@@ -1,4 +1,5 @@
 from models.generator import TSCNet
+from models.unet import UNet
 from models import discriminator
 import os
 from time import gmtime, strftime
@@ -16,6 +17,8 @@ import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 import warnings
 import logging
+from trainer.trainer import Trainer
+from trainer.unet_trainer import UTrainer
 warnings.filterwarnings('ignore')
 
 # global
@@ -112,17 +115,22 @@ def entry(rank, world_size, config):
     # model
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    model = TSCNet(num_channel=num_channel, num_features=n_fft // 2 + 1)
-    model = DistributedDataParallel(model.to(rank), device_ids=[rank])
+    if config['model']['type'] == "unet":
+        model = UNet(in_channels = num_channel, out_channels = num_channel)
+    else:
+        model = TSCNet(num_channel=num_channel, num_features=n_fft // 2 + 1)
+        model_discriminator = discriminator.Discriminator(ndf=ndf)
+        model_discriminator = DistributedDataParallel(model_discriminator.to(rank), device_ids=[rank])
     
-    model_discriminator = discriminator.Discriminator(ndf=ndf)
-    model_discriminator = DistributedDataParallel(model_discriminator.to(rank), device_ids=[rank])
+    # Distributed model
+    model = DistributedDataParallel(model.to(rank), device_ids=[rank])
 
 
     if rank == 0:
         summary(model, [(2, 2, cut_len//hop+1, int(n_fft/2)+1)])
-        summary(model_discriminator, [(1, 1, int(n_fft/2)+1, cut_len//hop+1),
-                                    (1, 1, int(n_fft/2)+1, cut_len//hop+1)])
+        if config['model'] == 'tscnet':
+            summary(model_discriminator, [(1, 1, int(n_fft/2)+1, cut_len//hop+1),
+                                        (1, 1, int(n_fft/2)+1, cut_len//hop+1)])
 
     
     # optimizer
@@ -132,20 +140,18 @@ def entry(rank, world_size, config):
             optimizer_class=torch.optim.AdamW,
             lr=init_lr
         )
-        optimizer_disc = ZeroRedundancyOptimizer(
-            model_discriminator.parameters(),
-            optimizer_class=torch.optim.AdamW,
-            lr=2*init_lr
-        )
+        if config['model']['type'] == 'tscnet':
+            optimizer_disc = ZeroRedundancyOptimizer(
+                model_discriminator.parameters(),
+                optimizer_class=torch.optim.AdamW,
+                lr=2*init_lr
+            )
     else:
         optimizer = torch.optim.AdamW(model.parameters(), 
                                     lr=init_lr)
-        optimizer_disc = torch.optim.AdamW(model_discriminator.parameters(), 
-                                    lr=2*init_lr)
-
-    # scheduler
-    scheduler_G = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
-    scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=decay_epoch, gamma=gamma)
+        if config['model']['type'] == 'tscnet':
+            optimizer_disc = torch.optim.AdamW(model_discriminator.parameters(), 
+                                        lr=2*init_lr)
 
     # tensorboard writer
     writer = SummaryWriter(os.path.join(save_model_dir, "tsb_log"))
@@ -158,41 +164,82 @@ def entry(rank, world_size, config):
 
     trainer_class = initialize_module(config["trainer"]["path"], initialize=False)
 
-    trainer = trainer_class(
-        dist = dist,
-        rank = rank,
-        resume = resume,
-        n_gpus = world_size,
-        epochs = epochs,
-        batch_size = batch_size,
-        model = model,
-        discriminator = model_discriminator,
-        train_ds = train_ds,
-        test_ds = test_ds,
-        scheduler_D = scheduler_D,
-        scheduler_G = scheduler_G,
-        optimizer = optimizer,
-        optimizer_disc = optimizer_disc,
+    if isinstance(trainer_class, Trainer):
+        # scheduler
+        scheduler_G = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
+        scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=decay_epoch, gamma=gamma)
         
-        loss_weights = loss_weights,
+        trainer = trainer_class(
+            dist = dist,
+            rank = rank,
+            resume = resume,
+            n_gpus = world_size,
+            epochs = epochs,
+            batch_size = batch_size,
+            model = model,
+            discriminator = model_discriminator,
+            train_ds = train_ds,
+            test_ds = test_ds,
+            scheduler_D = scheduler_D,
+            scheduler_G = scheduler_G,
+            optimizer = optimizer,
+            optimizer_disc = optimizer_disc,
+            
+            loss_weights = loss_weights,
 
-        hop = hop,
-        n_fft = n_fft,
-        
-        scaler = scaler,
-        use_amp = use_amp,
-        interval_eval = interval_eval,
-        max_clip_grad_norm = max_clip_grad_norm,
-        gradient_accumulation_steps = gradient_accumulation_steps,
+            hop = hop,
+            n_fft = n_fft,
+            
+            scaler = scaler,
+            use_amp = use_amp,
+            interval_eval = interval_eval,
+            max_clip_grad_norm = max_clip_grad_norm,
+            gradient_accumulation_steps = gradient_accumulation_steps,
 
-        remix = remix,
+            remix = remix,
+            
+            save_model_dir = save_model_dir,
+            data_test_dir = data_test_dir,
+            tsb_writer = writer,
+            num_prints = num_prints,
+            logger = logger
+        )
+    else:
+        # scheduler
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
         
-        save_model_dir = save_model_dir,
-        data_test_dir = data_test_dir,
-        tsb_writer = writer,
-        num_prints = num_prints,
-        logger = logger
-    )
+        trainer = trainer_class(
+            dist = dist,
+            rank = rank,
+            resume = resume,
+            n_gpus = world_size,
+            epochs = epochs,
+            batch_size = batch_size,
+            model = model,
+            train_ds = train_ds,
+            test_ds = test_ds,
+            scheduler = scheduler,
+            optimizer = optimizer,
+            
+            loss_weights = loss_weights,
+
+            hop = hop,
+            n_fft = n_fft,
+            
+            scaler = scaler,
+            use_amp = use_amp,
+            interval_eval = interval_eval,
+            max_clip_grad_norm = max_clip_grad_norm,
+            gradient_accumulation_steps = gradient_accumulation_steps,
+
+            remix = remix,
+            
+            save_model_dir = save_model_dir,
+            data_test_dir = data_test_dir,
+            tsb_writer = writer,
+            num_prints = num_prints,
+            logger = logger
+        )
 
     trainer.train()
 

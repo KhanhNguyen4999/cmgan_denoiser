@@ -32,6 +32,7 @@ gan =  0.05
 
 # Config model
 [model]
+type = "unet"
 num_channel = 64
 
 # Config feature

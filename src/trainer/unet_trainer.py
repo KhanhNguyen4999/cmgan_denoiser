@@ -12,7 +12,7 @@ from augment import Remix
 from models import discriminator
 
 
-class Trainer(BaseTrainer):
+class UTrainer(BaseTrainer):
     def __init__ (
                 self,
                 dist,
