@@ -42,7 +42,7 @@ class UTrainer(BaseTrainer):
                 logger
             ):
 
-        super(Trainer, self).__init__(
+        super(UTrainer, self).__init__(
                                 dist,
                                 rank,
                                 resume,
@@ -232,6 +232,7 @@ class UTrainer(BaseTrainer):
 
 
     def _train_epoch(self, epoch) -> None:
+        self.model.train()
         loss_train = []
 
         self.logger.info('\n <Epoch>: {} -- Start training '.format(epoch))

@@ -265,6 +265,9 @@ class Trainer(BaseTrainer):
 
 
     def _train_epoch(self, epoch) -> None:
+        self.model.train()
+        self.model_discriminator.train()
+        
         gen_loss_train, disc_loss_train = [], []
 
         self.logger.info('\n <Epoch>: {} -- Start training '.format(epoch))

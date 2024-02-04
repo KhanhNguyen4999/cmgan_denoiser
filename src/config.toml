@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_g7_14h_groupPosAttn=3"
+name = "CMGAN_unet"
 seed = 42
 epochs = 150
 cut_len = 32000
@@ -33,7 +33,7 @@ gan =  0.05
 # Config model
 [model]
 type = "unet"
-num_channel = 64
+num_channel = 3
 
 # Config feature
 [feature]
@@ -43,9 +43,9 @@ ndf = 16
 
 
 [dataset_train]
-path = "/data1/speech/khanhnnm/database/denoiser_db/cmgan_data_format/g7_14h/train"
+path = "/content/drive/MyDrive/data/VCTK/test"
 [dataset_train.dataloader]
-batchsize = 7
+batchsize = 4
 n_worker = 4
 pin_memory = true
 
@@ -54,7 +54,7 @@ shuffle = true
 drop_last = true
     
 [dataset_valid]
-path = "/data1/speech/khanhnnm/database/denoiser_db/valentini_2017/test"
+path = "/content/drive/MyDrive/data/VCTK/test"
     
 [dataset_valid.dataloader]
 batchsize = 4
@@ -65,7 +65,7 @@ shuffle = false
 drop_last = false 
 
 [dataset_test]
-path = "/data1/speech/khanhnnm/database/denoiser_db/valentini_2017/test"
+path = "/content/drive/MyDrive/data/VCTK/test"
 
 
 [optimizer]
@@ -76,4 +76,4 @@ decay_epoch = 30
 gamma = 0.5
 
 [trainer]
-path = "trainer.trainer.Trainer"
+path = "trainer.unet_trainer.UTrainer"

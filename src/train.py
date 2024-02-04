@@ -127,8 +127,10 @@ def entry(rank, world_size, config):
 
 
     if rank == 0:
-        summary(model, [(2, 2, cut_len//hop+1, int(n_fft/2)+1)])
+        summary(model, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
+        
         if config['model'] == 'tscnet':
+            summary(model, [(2, 2, cut_len//hop+1, int(n_fft/2)+1)])
             summary(model_discriminator, [(1, 1, int(n_fft/2)+1, cut_len//hop+1),
                                         (1, 1, int(n_fft/2)+1, cut_len//hop+1)])
 
@@ -168,7 +170,7 @@ def entry(rank, world_size, config):
         # scheduler
         scheduler_G = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
         scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=decay_epoch, gamma=gamma)
-        
+
         trainer = trainer_class(
             dist = dist,
             rank = rank,

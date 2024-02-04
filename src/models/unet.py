@@ -33,8 +33,12 @@ class UNet(nn.Module):
         )
 
     def forward(self, x):
+        mag = torch.sqrt(x[:, 0, :, :]**2 + x[:, 1, :, :]**2).unsqueeze(1)
+        noisy_phase = torch.angle(torch.complex(x[:, 0, :, :], x[:, 1, :, :])).unsqueeze(1)
+        x_in = torch.cat([mag, x], dim=1)
+
         # Encoder
-        x1 = self.encoder(x)
+        x1 = self.encoder(x_in)
 
         # Mid part
         x2 = self.mid(x1)

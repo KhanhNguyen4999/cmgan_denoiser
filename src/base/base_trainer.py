@@ -63,8 +63,6 @@ class BaseTrainer:
 
     def train(self) -> None:
         for epoch in range(self.epoch_start, self.epochs):
-            self.model.train()
-            self.model_discriminator.train()
             self._train_epoch(epoch)
         
         if self.rank == 0:
