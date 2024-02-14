@@ -1,5 +1,6 @@
 from models.generator import TSCNet
 from models.unet import UNet
+from models.demucs import Demucs
 from models import discriminator
 import os
 from time import gmtime, strftime
@@ -116,7 +117,7 @@ def entry(rank, world_size, config):
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     if config['model']['type'] == "unet":
-        model = UNet(in_channels = num_channel, out_channels = num_channel)
+        model = Demucs(kernel_size = 3)
     else:
         model = TSCNet(num_channel=num_channel, num_features=n_fft // 2 + 1)
         model_discriminator = discriminator.Discriminator(ndf=ndf)
