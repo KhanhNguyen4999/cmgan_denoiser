@@ -124,7 +124,7 @@ def entry(rank, world_size, config):
         model_discriminator = DistributedDataParallel(model_discriminator.to(rank), device_ids=[rank])
     
     # Distributed model
-    model = DistributedDataParallel(model.to(rank), device_ids=[rank])
+    model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
 
     if rank == 0:

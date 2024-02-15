@@ -22,45 +22,54 @@ logger = logging.getLogger(__name__)
 
 @torch.no_grad()
 def enhance_one_track(model, audio_path, saved_dir, cut_len, n_fft=400, hop=100, save_tracks=False):
-    name = os.path.split(audio_path)[-1]
-    noisy, sr = torchaudio.load(audio_path)
-    assert sr == 16000
-    noisy = noisy.cuda()
+    try:  
+        name = os.path.split(audio_path)[-1]
+        noisy, sr = torchaudio.load(audio_path)
+        assert sr == 16000
+        noisy = noisy.cuda()
 
-    c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-    noisy = torch.transpose(noisy, 0, 1)
-    noisy = torch.transpose(noisy * c, 0, 1)
+        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+        noisy = torch.transpose(noisy, 0, 1)
+        noisy = torch.transpose(noisy * c, 0, 1)
 
-    length = noisy.size(-1)
-    frame_num = int(np.ceil(length / 100))
-    padded_len = frame_num * 100
-    padding_len = padded_len - length
-    noisy = torch.cat([noisy, noisy[:, :padding_len]], dim=-1)
-    if padded_len > cut_len:
-        batch_size = int(np.ceil(padded_len/cut_len))
-        while 100 % batch_size != 0:
-            batch_size += 1
-        noisy = torch.reshape(noisy, (batch_size, -1))
+        length = noisy.size(-1)
+        frame_num = int(np.ceil(length / 100))
+        padded_len = frame_num * 100
+        padding_len = padded_len - length
+        noisy = torch.cat([noisy, noisy[:, :padding_len]], dim=-1)
+        if padded_len > cut_len:
+            batch_size = int(np.ceil(padded_len/cut_len))
+            while 100 % batch_size != 0:
+                batch_size += 1
+            noisy = torch.reshape(noisy, (batch_size, -1))
 
-    noisy_spec = torch.stft(noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True)
-    noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
-    time_start = time.time()
-    est_real, est_imag = model(noisy_spec)
-    time_end = time.time()
-    est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
+        noisy_spec = torch.stft(noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True)
+        noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
+        time_start = time.time()
+        print("Evaluation: ", noisy_spec.shape)
+        if noisy_spec.shape[2] % 2 == 0:
+            import torch.nn.functional as F
+            noisy_spec = F.pad(noisy_spec, (0, 0, 0, 1))
 
-    est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
-    est_audio = torch.istft(est_spec_uncompress, n_fft, hop, window=torch.hamming_window(n_fft).cuda(),
-                            onesided=True)
-    est_audio = est_audio / c
-    est_audio = torch.flatten(est_audio)[:length].cpu().numpy()
-    assert len(est_audio) == length
-    if save_tracks:
-        saved_path = os.path.join(saved_dir, name)
-        sf.write(saved_path, est_audio, sr)
+        est_real, est_imag = model(noisy_spec)
+        time_end = time.time()
+        est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
 
-    RTF = (time_end - time_start) / (length / sr)
-    return est_audio, length
+        est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
+        est_audio = torch.istft(est_spec_uncompress, n_fft, hop, window=torch.hamming_window(n_fft).cuda(),
+                                onesided=True)
+        est_audio = est_audio / c
+        est_audio = torch.flatten(est_audio)[:length].cpu().numpy()
+        assert len(est_audio) == length
+        if save_tracks:
+            saved_path = os.path.join(saved_dir, name)
+            sf.write(saved_path, est_audio, sr)
+
+        RTF = (time_end - time_start) / (length / sr)
+    except:
+        est_audio = None
+        length = None
+    return est_audio, length, RTF
 
 
 def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
@@ -84,7 +93,7 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
     audio_list = os.listdir(noisy_dir)
     audio_list = natsorted(audio_list)
     
-    ls_est_audio = Parallel(n_jobs=1)(
+    ls_est_audio = Parallel(n_jobs=10)(
                 delayed(enhance_one_track)(model, 
                                             os.path.join(noisy_dir, audio),
                                             saved_dir,
@@ -93,6 +102,8 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
                                             n_fft//4, 
                                             save_tracks
                                             ) for audio in audio_list)
+    
+    RTF = np.mean([e[2] for e in ls_est_audio])
     
     sr = 16000
     metrics = Parallel(n_jobs=10)(
@@ -104,8 +115,13 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
 
     metrics_avg = np.mean(metrics, 0)
 
-    print('pesq: ', metrics_avg[0], 'csig: ', metrics_avg[1], 'cbak: ', metrics_avg[2], 'covl: ',
-          metrics_avg[3], 'ssnr: ', metrics_avg[4], 'stoi: ', metrics_avg[5])
+    print('pesq: ', metrics_avg[0], 
+          'csig: ', metrics_avg[1], 
+          'cbak: ', metrics_avg[2], 
+          'covl: ', metrics_avg[3], 
+          'ssnr: ', metrics_avg[4], 
+          'stoi: ', metrics_avg[5],
+          'RTF: ', RTF )
 
 def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
     n_fft = 400
@@ -136,6 +152,7 @@ def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
     )
 
     metrics_avg = np.mean(metrics, 0)
+    RTF = np.mean([e[2] for e in ls_est_audio])
     
     # print('pesq: ', metrics_avg[0], 'csig: ', metrics_avg[1], 'cbak: ', metrics_avg[2], 'covl: ',
     #       metrics_avg[3], 'ssnr: ', metrics_avg[4], 'stoi: ', metrics_avg[5])
@@ -145,7 +162,8 @@ def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
                         "cbak": metrics_avg[2], 
                         "covl": metrics_avg[3], 
                         "ssnr": metrics_avg[4],
-                        "stoi": metrics_avg[5]}
+                        "stoi": metrics_avg[5],
+                        "RTF": RTF}
     
     return metrics_avg_dict
 
