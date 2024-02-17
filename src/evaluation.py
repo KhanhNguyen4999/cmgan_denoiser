@@ -46,7 +46,7 @@ def enhance_one_track(model, audio_path, saved_dir, cut_len, n_fft=400, hop=100,
         noisy_spec = torch.stft(noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True)
         noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
         time_start = time.time()
-        print("Evaluation: ", noisy_spec.shape)
+        
         if noisy_spec.shape[2] % 2 == 0:
             import torch.nn.functional as F
             noisy_spec = F.pad(noisy_spec, (0, 0, 0, 1))
