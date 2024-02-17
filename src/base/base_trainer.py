@@ -42,23 +42,23 @@ class BaseTrainer:
             params_of_network += param.numel()
         print(f"The amount of parameters in the project is {params_of_network / 1e6} million.")
 
-    def _reset(self):
+    def reset(self):
         '''
         function help to reload the pretrained model
         '''
         raise NotImplementedError
 
-    def _serialize(self, epoch) -> None:
+    def serialize(self, epoch) -> None:
         '''
         function help to save new general checkpoint
         '''
         raise NotImplementedError 
 
 
-    def _train_epoch(self, epoch) -> None:
+    def train_epoch(self, epoch) -> None:
         raise NotImplementedError
 
-    def _valid_epoch(self, epoch) -> None:
+    def valid_epoch(self, epoch) -> None:
         raise NotImplementedError
 
     def train(self) -> None:

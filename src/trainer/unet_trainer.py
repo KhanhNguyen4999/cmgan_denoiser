@@ -89,7 +89,7 @@ class UTrainer(BaseTrainer):
             os.makedirs(self.save_enhanced_dir)
 
         if self.resume:
-            self._reset()
+            self.reset()
             
 
     def gather(self, value: torch.tensor) -> Any:
@@ -101,7 +101,7 @@ class UTrainer(BaseTrainer):
         self.dist.all_gather(output_tensors, value)
         return torch.cat(output_tensors, dim=0)
 
-    def _serialize(self, epoch):
+    def serialize(self, epoch):
         '''
         function help to save new general checkpoint
         '''
@@ -130,7 +130,7 @@ class UTrainer(BaseTrainer):
         tmp_path = os.path.join(self.save_model_dir, "best.th")
         torch.save(model, tmp_path)
 
-    def _reset(self):
+    def reset(self):
         # self.dist.barrier()
         if os.path.exists(self.save_model_dir) and os.path.isfile(self.save_model_dir + "/checkpoint.tar"):
             if self.rank == 0:
@@ -156,11 +156,7 @@ class UTrainer(BaseTrainer):
                 self.logger.info(f"Load pretrained info: ")
                 self.logger.info(f"Best loss: {self.best_loss}")
 
-
-    def _train_step(self, batch):
-        clean = batch[0].cuda()
-        noisy = batch[1].cuda()
-
+    def forward_generator_step(self, clean, noisy):
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
         noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
@@ -184,39 +180,62 @@ class UTrainer(BaseTrainer):
         # Runs the forward pass under autocast.
         with autocast(enabled = self.use_amp):
             est_real, est_imag = self.model(noisy_spec)
-            if self.use_amp:
-                # output is float16 because linear layers autocast to float16.
-                # assert est_real.dtype is torch.float16, f"est_real's dtype is not torch.float16 but {est_real.dtype}"
-                # assert est_imag.dtype is torch.float16, f"est_imag's dtype is not torch.float16 but {est_imag.dtype}"
-                None
 
-            est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
-            est_mag = torch.sqrt(est_real**2 + est_imag**2)
-            clean_mag = torch.sqrt(clean_real**2 + clean_imag**2)
+        if self.use_amp:
+            # output is float16 because linear layers autocast to float16.
+            # assert est_real.dtype is torch.float16, f"est_real's dtype is not torch.float16 but {est_real.dtype}"
+            # assert est_imag.dtype is torch.float16, f"est_imag's dtype is not torch.float16 but {est_imag.dtype}"
+            None
 
-            loss_mag = torch.mean(((est_mag - clean_mag)**2).reshape(est_mag.shape[0], -1), 1)
-            loss_ri = torch.mean(((est_real - clean_real)**2).reshape(est_mag.shape[0], -1), 1) + \
-                        torch.mean(((est_imag - clean_imag)**2).reshape(est_mag.shape[0], -1), 1)
+        est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
+        est_mag = torch.sqrt(est_real**2 + est_imag**2)
+        clean_mag = torch.sqrt(clean_real**2 + clean_imag**2)
 
-            est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
-            est_audio = torch.istft(est_spec_uncompress, self.n_fft, self.hop,
+        est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
+        est_audio = torch.istft(est_spec_uncompress, self.n_fft, self.hop,
                                     window=torch.hamming_window(self.n_fft).cuda(), onesided=True)
 
-            time_loss = torch.mean(torch.abs(est_audio - clean))
-            length = est_audio.size(-1)
-        
-        est_audio_list = list(est_audio.detach().cpu().numpy())
-        clean_audio_list = list(clean.cpu().numpy()[:, :length])
-        pesq_score = discriminator.batch_pesq(clean_audio_list, est_audio_list, self.n_gpus)
-        pesq_score_weight = torch.nn.functional.softmax(1 - pesq_score)
 
-        loss_ri = (loss_ri * pesq_score_weight).sum()
-        loss_mag = (loss_mag * pesq_score_weight).sum()
+        return {
+            "est_real": est_real,
+            "est_imag": est_imag,
+            "est_mag": est_mag,
+            "clean_real": clean_real,
+            "clean_imag": clean_imag,
+            "clean_mag": clean_mag,
+            "est_audio": est_audio,
+        }
 
-        loss = self.loss_weights[0] * loss_ri + \
-                    self.loss_weights[1] * loss_mag + \
-                    self.loss_weights[2] * time_loss
+    def calculate_generator_loss(self, generator_outputs):
+
+        loss_mag = F.mse_loss(
+            generator_outputs["est_mag"], generator_outputs["clean_mag"]
+        )
+        loss_ri = F.mse_loss(
+            generator_outputs["est_real"], generator_outputs["clean_real"]
+        ) + F.mse_loss(generator_outputs["est_imag"], generator_outputs["clean_imag"])
+
+        time_loss = torch.mean(
+            torch.abs(generator_outputs["est_audio"] - generator_outputs["clean"])
+        )
+
+        loss = (
+            self.loss_weights[0] * loss_ri
+            + self.loss_weights[1] * loss_mag
+            + self.loss_weights[2] * time_loss
+        )
         
+        return loss
+        
+        
+    def train_step(self, batch):
+        clean = batch[0].cuda()
+        noisy = batch[1].cuda()
+        
+        generator_outputs = self.forward_generator_step(clean, noisy)
+        generator_outputs["clean"] = clean
+
+        loss = self.calculate_generator_loss(generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
@@ -231,7 +250,7 @@ class UTrainer(BaseTrainer):
         return loss.item()
 
 
-    def _train_epoch(self, epoch) -> None:
+    def train_epoch(self, epoch) -> None:
         self.model.train()
         loss_train = []
 
@@ -240,7 +259,7 @@ class UTrainer(BaseTrainer):
         logprog = LogProgress(self.logger, self.train_ds, updates=self.num_prints, name=name)
 
         for idx, batch in enumerate(logprog):
-            loss = self._train_step(batch)
+            loss = self.train_step(batch)
             loss_train.append(loss )
         
             if self.rank  == 0:
@@ -269,7 +288,7 @@ class UTrainer(BaseTrainer):
             self.logger.info(bold(f"     Epoch {epoch} - Overall Summary Training | {info}"))
             self.tsb_writer.add_scalar("Loss_gen/train", loss_train, epoch)
 
-        loss_valid = self._valid_epoch(epoch)
+        loss_valid = self.valid_epoch(epoch)
 
          # save best checkpoint
         if self.rank == 0:
@@ -298,7 +317,7 @@ class UTrainer(BaseTrainer):
                 self.logger.info(bold(f"     Evaluation Summary:  | Epoch {epoch} | {info}"))
 
             # Save checkpoint
-            self._serialize(epoch)
+            self.serialize(epoch)
 
         self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
         self.scheduler.step()
@@ -307,51 +326,17 @@ class UTrainer(BaseTrainer):
     def test_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
-        one_labels = torch.ones(clean.size(0)).cuda()
-
-        # Normalization
-        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
-        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
-
-        noisy_spec = torch.stft(noisy, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
-                                onesided=True)
-        clean_spec = torch.stft(clean, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
-                                onesided=True)
-
-        noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
-        clean_spec = power_compress(clean_spec)
-        clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
-        clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
-
-        est_real, est_imag = self.model(noisy_spec)
-        est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
-        est_mag = torch.sqrt(est_real ** 2 + est_imag ** 2)
-        clean_mag = torch.sqrt(clean_real ** 2 + clean_imag ** 2)
-
-        loss_mag = torch.mean(((est_mag - clean_mag)**2).reshape(est_mag.shape[0], -1), 1)
-        loss_ri = torch.mean(((est_real - clean_real)**2).reshape(est_mag.shape[0], -1), 1) + \
-                    torch.mean(((est_imag - clean_imag)**2).reshape(est_mag.shape[0], -1), 1)
-
-        est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
-        est_audio = torch.istft(est_spec_uncompress, self.n_fft, self.hop,
-                                window=torch.hamming_window(self.n_fft).cuda(), onesided=True)
-
-        time_loss = torch.mean(torch.abs(est_audio - clean))
-        length = est_audio.size(-1)
         
-        est_audio_list = list(est_audio.detach().cpu().numpy())
-        clean_audio_list = list(clean.cpu().numpy()[:, :length])
-        pesq_score = discriminator.batch_pesq(clean_audio_list, est_audio_list, self.n_gpus)
-        pesq_score_weight = torch.nn.functional.softmax(1 - pesq_score)
+        generator_outputs = self.forward_generator_step(clean, noisy)
+        generator_outputs["clean"] = clean
 
-        loss_ri = (loss_ri * pesq_score_weight).sum()
-        loss_mag = (loss_mag * pesq_score_weight).sum()
+        loss = self.calculate_generator_loss(generator_outputs)
 
-        loss = self.loss_weights[0] * loss_ri + \
-                    self.loss_weights[1] * loss_mag + \
-                    self.loss_weights[2] * time_loss
-        
+        # loss is float32 because mse_loss layers autocast to float32.
+        assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
+
+        self.scaler.scale(loss).backward(retain_graph=True)
+
         # Logging
         # average over devices in ddp
         if self.n_gpus > 1:
@@ -359,7 +344,7 @@ class UTrainer(BaseTrainer):
 
         return loss.item()
 
-    def _valid_epoch(self, epoch):
+    def valid_epoch(self, epoch):
 
         self.model.eval()
 

@@ -97,7 +97,7 @@ class Trainer(BaseTrainer):
             os.makedirs(self.save_enhanced_dir)
 
         if self.resume:
-            self._reset()
+            self.reset()
             
 
     def gather(self, value: torch.tensor) -> Any:
@@ -109,7 +109,7 @@ class Trainer(BaseTrainer):
         self.dist.all_gather(output_tensors, value)
         return torch.cat(output_tensors, dim=0)
 
-    def _serialize(self, epoch):
+    def serialize(self, epoch):
         '''
         function help to save new general checkpoint
         '''
@@ -142,7 +142,7 @@ class Trainer(BaseTrainer):
         tmp_path = os.path.join(self.save_model_dir, "best.th")
         torch.save(model, tmp_path)
 
-    def _reset(self):
+    def reset(self):
         # self.dist.barrier()
         if os.path.exists(self.save_model_dir) and os.path.isfile(self.save_model_dir + "/checkpoint.tar"):
             if self.rank == 0:
@@ -172,7 +172,7 @@ class Trainer(BaseTrainer):
                 self.logger.info(f"Best loss: {self.best_loss}")
 
 
-    def _train_step(self, batch):
+    def train_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
         one_labels = torch.ones(min(self.batch_size, clean.size(0))).cuda()
@@ -264,7 +264,7 @@ class Trainer(BaseTrainer):
         return loss.item(), discrim_loss_metric.item()
 
 
-    def _train_epoch(self, epoch) -> None:
+    def train_epoch(self, epoch) -> None:
         self.model.train()
         self.model_discriminator.train()
         
@@ -275,7 +275,7 @@ class Trainer(BaseTrainer):
         logprog = LogProgress(self.logger, self.train_ds, updates=self.num_prints, name=name)
 
         for idx, batch in enumerate(logprog):
-            loss, disc_loss = self._train_step(batch)
+            loss, disc_loss = self.train_step(batch)
             gen_loss_train.append(loss )
             disc_loss_train.append(disc_loss)
             if self.rank  == 0:
@@ -308,7 +308,7 @@ class Trainer(BaseTrainer):
             self.tsb_writer.add_scalar("Loss_gen/train", gen_loss_train, epoch)
             self.tsb_writer.add_scalar("Loss_disc/train", disc_loss_train, epoch)
 
-        gen_loss_valid, disc_loss_valid = self._valid_epoch(epoch)
+        gen_loss_valid, disc_loss_valid = self.valid_epoch(epoch)
 
          # save best checkpoint
         if self.rank == 0:
@@ -339,7 +339,7 @@ class Trainer(BaseTrainer):
                 self.logger.info(bold(f"     Evaluation Summary:  | Epoch {epoch} | {info}"))
 
             # Save checkpoint
-            self._serialize(epoch)
+            self.serialize(epoch)
 
         self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
         self.scheduler_G.step()
@@ -415,7 +415,7 @@ class Trainer(BaseTrainer):
 
         return loss.item(), discrim_loss_metric.item()
 
-    def _valid_epoch(self, epoch):
+    def valid_epoch(self, epoch):
 
         self.model.eval()
         self.model_discriminator.eval()
