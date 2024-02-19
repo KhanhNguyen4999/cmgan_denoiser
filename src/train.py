@@ -117,7 +117,7 @@ def entry(rank, world_size, config):
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     if config['model']['type'] == "unet":
-        model = Demucs(kernel_size = 3)
+        model = UNet(n_channels=3, bilinear=True)
     else:
         model = TSCNet(num_channel=num_channel, num_features=n_fft // 2 + 1)
         model_discriminator = discriminator.Discriminator(ndf=ndf)

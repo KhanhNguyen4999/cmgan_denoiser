@@ -117,7 +117,7 @@ def entry(rank, world_size, config):
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     model = UNet(n_channels=num_channel, bilinear=True)
-    teacher_model = TSCNet(num_channel=num_channel, num_features=n_fft // 2 + 1)
+    teacher_model = TSCNet(num_channel=64, num_features=n_fft // 2 + 1)
     
     # Distributed model
     model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)

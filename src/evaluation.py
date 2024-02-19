@@ -133,7 +133,7 @@ def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
     audio_list = os.listdir(noisy_dir)
     audio_list = natsorted(audio_list)
     
-    ls_est_audio = Parallel(n_jobs=1)(
+    ls_est_audio = Parallel(n_jobs=2, prefer="threads")(
                 delayed(enhance_one_track)(model, 
                                             os.path.join(noisy_dir, audio),
                                             saved_dir,

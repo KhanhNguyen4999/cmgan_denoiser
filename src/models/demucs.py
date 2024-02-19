@@ -270,7 +270,13 @@ class Demucs(nn.Module):
         for encode in self.encoder:
             x = encode(x)
             skips.append(x)
-      
+
+        b, c, t, f = x.size()
+        x = x.permute(2, 0, 3, 1).contiguous().view(t, b*f, c)
+        # print("X shape LSTM: ", x.shape)
+        x, _ = self.lstm(x)
+        x = x.view(b, f, t, c).permute(0, 3, 2, 1)
+        
         x_prev = None
         for decode in self.decoder:
             skip = skips.pop(-1)

@@ -335,8 +335,6 @@ class UTrainer(BaseTrainer):
         # loss is float32 because mse_loss layers autocast to float32.
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
 
-        self.scaler.scale(loss).backward(retain_graph=True)
-
         # Logging
         # average over devices in ddp
         if self.n_gpus > 1:
