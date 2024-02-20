@@ -1,5 +1,6 @@
 import numpy as np
 from models import generator
+from models.unet import UNet
 from natsort import natsorted
 import os
 from tools.compute_metrics import compute_metrics
@@ -66,9 +67,11 @@ def enhance_one_track(model, audio_path, saved_dir, cut_len, n_fft=400, hop=100,
             sf.write(saved_path, est_audio, sr)
 
         RTF = (time_end - time_start) / (length / sr)
-    except:
+    except Exception as exp:
+        print("exp: ", exp)
         est_audio = None
         length = None
+        RTF = None
     return est_audio, length, RTF
 
 
@@ -83,9 +86,11 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
         # name = k
         new_state_dict[name] = v
 
-    model = generator.TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
+    # model = generator.TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
+    model = UNet(n_channels=3, bilinear=True)
     model.load_state_dict(new_state_dict)
     model.eval()
+    model = model.cuda()
 
     if not os.path.exists(saved_dir):
         os.mkdir(saved_dir)
@@ -93,7 +98,7 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
     audio_list = os.listdir(noisy_dir)
     audio_list = natsorted(audio_list)
     
-    ls_est_audio = Parallel(n_jobs=10)(
+    ls_est_audio = Parallel(n_jobs=2, prefer="threads")(
                 delayed(enhance_one_track)(model, 
                                             os.path.join(noisy_dir, audio),
                                             saved_dir,
@@ -198,4 +203,5 @@ if __name__ == '__main__':
         noisy_dir = os.path.join(args.test_dir, 'noisy')
         clean_dir = os.path.join(args.test_dir, 'clean')
         load_from_checkpoint = True
+        args.save_tracks = False
         evaluation(args.model_path, noisy_dir, clean_dir, args.save_tracks, args.save_dir)
