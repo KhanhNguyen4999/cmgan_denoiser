@@ -37,6 +37,15 @@ def setup(rank, world_size):
         world_size=world_size,
         rank=rank)
 
+def load_state_dict_from_checkpoint(checkpoint_path):
+    state_dict = torch.load(checkpoint_path)
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k
+        new_state_dict[name] = v
+    return new_state_dict
+
 def entry(rank, world_size, config):
     # init distributed training
     # os.environ["CUDA_VISIBLE_DEVICES"] = config["main"]["device_ids"]
@@ -61,7 +70,7 @@ def entry(rank, world_size, config):
     num_channel = config['model']['num_channel']
     # augment
     remix = config["main"]["augment"]["remix"]
-
+    teacher_checkpoint = "/home/duynk29/khanhnnm/cmgan_denoiser/src/best_ckpt/ckpt"
 
     # feature
     n_fft = config["feature"]["n_fft"]
@@ -116,12 +125,15 @@ def entry(rank, world_size, config):
     # model
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
+    # ----- Load student model and teacher model
     model = UNet(n_channels=num_channel, bilinear=True)
-    teacher_model = TSCNet(num_channel=64, num_features=n_fft // 2 + 1)
+    state_dict = load_state_dict_from_checkpoint(teacher_checkpoint)
+    teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
+    teacher_model.load_state_dict(state_dict)
     
     # Distributed model
     model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
-    teacher_model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
+    teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
 
     if rank == 0:

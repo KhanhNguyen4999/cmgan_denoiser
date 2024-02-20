@@ -55,7 +55,7 @@ class UTrainer(BaseTrainer):
                                 max_clip_grad_norm,
                                 save_model_dir
                             )
-                           
+        
         self.optimizer = optimizer
         self.batch_size = batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
@@ -157,11 +157,7 @@ class UTrainer(BaseTrainer):
                 self.logger.info(f"Best loss: {self.best_loss}")
 
     def forward_generator_step(self, clean, noisy):
-        # Normalization
-        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
-        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
-
+        
         if len(self.augment) > 0:
             sources = torch.stack([noisy - clean, clean])
             sources = self.augment(sources)
@@ -177,9 +173,11 @@ class UTrainer(BaseTrainer):
         clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
         clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
 
+        
         # Runs the forward pass under autocast.
         with autocast(enabled = self.use_amp):
             est_real, est_imag = self.model(noisy_spec)
+        
 
         if self.use_amp:
             # output is float16 because linear layers autocast to float16.
@@ -226,15 +224,19 @@ class UTrainer(BaseTrainer):
         )
         
         return loss
-        
-        
+
+
     def train_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
+
+        # Normalization
+        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
+        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
         
         generator_outputs = self.forward_generator_step(clean, noisy)
         generator_outputs["clean"] = clean
-
         loss = self.calculate_generator_loss(generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
@@ -252,6 +254,7 @@ class UTrainer(BaseTrainer):
 
     def train_epoch(self, epoch) -> None:
         self.model.train()
+
         loss_train = []
 
         self.logger.info('\n <Epoch>: {} -- Start training '.format(epoch))
@@ -326,10 +329,14 @@ class UTrainer(BaseTrainer):
     def test_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
+
+        # Normalization
+        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
+        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
         
         generator_outputs = self.forward_generator_step(clean, noisy)
         generator_outputs["clean"] = clean
-
         loss = self.calculate_generator_loss(generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
@@ -355,6 +362,3 @@ class UTrainer(BaseTrainer):
         loss_avg = loss_total / step
 
         return loss_avg
-
-
-    
