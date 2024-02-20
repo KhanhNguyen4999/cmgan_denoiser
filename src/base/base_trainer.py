@@ -63,7 +63,7 @@ class BaseTrainer:
 
     def train(self) -> None:
         for epoch in range(self.epoch_start, self.epochs):
-            self._train_epoch(epoch)
+            self.train_epoch(epoch)
         
         if self.rank == 0:
             print("Training Process Done")
