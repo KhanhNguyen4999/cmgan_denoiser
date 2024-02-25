@@ -9,6 +9,7 @@ import os
 from evaluation import evaluation_model
 from tools.compute_metrics import stoi
 from tools.FKD import FKD
+from tools.AFD import AFD
 from augment import Remix
 
 
@@ -40,7 +41,8 @@ class KDTrainer(BaseTrainer):
                 data_test_dir,
                 tsb_writer,
                 num_prints,
-                logger
+                logger,
+                kd_args
             ):
 
         super(KDTrainer, self).__init__(
@@ -93,7 +95,7 @@ class KDTrainer(BaseTrainer):
         if self.resume:
             self.reset()
 
-        self.FKD = FKD().cuda()
+        self.AFD = AFD(kd_args).cuda()
 
     def gather(self, value: torch.tensor) -> Any:
         # gather value across devices - https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_gather
@@ -245,8 +247,9 @@ class KDTrainer(BaseTrainer):
         return kd_loss
         
     def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
+        
         with autocast(enabled = self.use_amp):
-            loss = self.FKD(teacher_generator_outputs['features'], student_generator_outputs['features'])
+            loss = self.AKD(teacher_generator_outputs['features'], student_generator_outputs['features'])
         return loss.mean()
 
 

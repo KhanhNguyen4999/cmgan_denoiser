@@ -166,6 +166,11 @@ def entry(rank, world_size, config):
 
     # scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
+
+    kd_args = parser.parse_args()
+    kd_args.s_shapes = [(16, 256, 40, 25), (16, 128, 80, 50), (16, 64, 160, 100), (16, 32, 321, 201)]
+    kd_args.t_shapes = [(16, 64, 321, 101)]
+    kd_args.qk_dim = 256
     
     trainer = trainer_class(
         dist = dist,
@@ -198,7 +203,8 @@ def entry(rank, world_size, config):
         data_test_dir = data_test_dir,
         tsb_writer = writer,
         num_prints = num_prints,
-        logger = logger
+        logger = logger,
+        kd_args = kd_args
     )
 
     trainer.train()
