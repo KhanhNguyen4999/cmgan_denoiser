@@ -249,8 +249,8 @@ class KDTrainer(BaseTrainer):
     def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
         
         with autocast(enabled = self.use_amp):
-            loss = self.AKD(teacher_generator_outputs['features'], student_generator_outputs['features'])
-        return loss.mean()
+            loss = self.AFD(student_generator_outputs['features'], teacher_generator_outputs['features'])
+        return loss
 
 
     def train_step(self, batch):

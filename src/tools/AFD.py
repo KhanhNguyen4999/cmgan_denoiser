@@ -58,13 +58,13 @@ class AFD(nn.Module):
 
         logit = torch.add(torch.einsum('bstq,btq->bts', bilinear_key, query), p_logit) / np.sqrt(self.qk_dim)
         atts = F.softmax(logit, dim=2)  # b x t x s
-        loss = []
+        loss = 0.0
 
         for i in range(self.n_t):
             h_hat_s = h_hat_s_all[i]
             h_t = h_t_all[i]
             diff = self.cal_diff(h_hat_s, h_t, atts[:, i])
-            loss.append(diff)
+            loss += diff
 
         return loss
 
@@ -96,7 +96,7 @@ class LinearTransformStudent(nn.Module):
         self.s = len(args.s_shapes)
         self.qk_dim = args.qk_dim
         self.relu = nn.ReLU(inplace=False)
-        self.samplers = nn.ModuleList([Sample(t_shape) for t_shape in args.unique_t_shapes])
+        self.samplers = nn.ModuleList([Sample(t_shape) for t_shape in args.t_shapes])
 
         self.key_layer = nn.ModuleList([nn_bn_relu(s_shape[1], self.qk_dim) for s_shape in args.s_shapes])
         self.bilinear = nn_bn_relu(args.qk_dim, args.qk_dim * len(args.t_shapes))
@@ -120,5 +120,5 @@ class Sample(nn.Module):
         self.up = torch.nn.Upsample(size=(t_H, t_W), mode='bilinear', align_corners=False)
 
     def forward(self, g_s, bs):
-        g_s = torch.stack([self.sample(f_s.pow(2).mean(1, keepdim=True)).view(bs, -1) for f_s in g_s], dim=1)
+        g_s = torch.stack([self.up(f_s.mean(1, keepdim=True)).view(bs, -1) for f_s in g_s], dim=1)
         return g_s

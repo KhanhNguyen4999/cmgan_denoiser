@@ -18,8 +18,7 @@ import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 import warnings
 import logging
-from trainer.trainer import Trainer
-from trainer.unet_trainer import UTrainer
+
 warnings.filterwarnings('ignore')
 
 # global
@@ -46,7 +45,7 @@ def load_state_dict_from_checkpoint(checkpoint_path):
         new_state_dict[name] = v
     return new_state_dict
 
-def entry(rank, world_size, config):
+def entry(rank, world_size, config, args):
     # init distributed training
     # os.environ["CUDA_VISIBLE_DEVICES"] = config["main"]["device_ids"]
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
@@ -166,11 +165,6 @@ def entry(rank, world_size, config):
 
     # scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
-
-    kd_args = parser.parse_args()
-    kd_args.s_shapes = [(16, 256, 40, 25), (16, 128, 80, 50), (16, 64, 160, 100), (16, 32, 321, 201)]
-    kd_args.t_shapes = [(16, 64, 321, 101)]
-    kd_args.qk_dim = 256
     
     trainer = trainer_class(
         dist = dist,
@@ -204,7 +198,7 @@ def entry(rank, world_size, config):
         tsb_writer = writer,
         num_prints = num_prints,
         logger = logger,
-        kd_args = kd_args
+        kd_args = args
     )
 
     trainer.train()
@@ -225,6 +219,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
     config = toml.load(args.config)
 
+    # kd argument
+    
+    args.s_shapes = [(16, 256, 40, 25), (16, 128, 80, 50), (16, 64, 160, 100), (16, 32, 321, 201)]
+    args.t_shapes = [(16, 64, 321, 101)]
+    args.qk_dim = 256
 
     print(args)
     available_gpus = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
@@ -234,7 +233,7 @@ if __name__ == '__main__':
 
     try: 
         mp.spawn(entry,
-                args=(args.n_gpus, config),
+                args=(args.n_gpus, config, args),
                 nprocs=args.n_gpus,
                 join=True)
     except KeyboardInterrupt:

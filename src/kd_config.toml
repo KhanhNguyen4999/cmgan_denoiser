@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_fkd"
+name = "CMGAN_AFD"
 seed = 42
 epochs = 150
 cut_len = 32000

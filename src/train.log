@@ -16,3 +16,10 @@
 17:57:13,966 torch.nn.parallel.distributed INFO Reducer buckets have been rebuilt in this iteration.
 18:07:27,88 torch.nn.parallel.distributed INFO Reducer buckets have been rebuilt in this iteration.
 18:07:27,149 torch.nn.parallel.distributed INFO Reducer buckets have been rebuilt in this iteration.
+15:23:28,768 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+15:23:28,769 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+15:23:36,703 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+15:23:36,978 h5py._conv DEBUG Creating converter from 7 to 5
+15:23:36,978 h5py._conv DEBUG Creating converter from 5 to 7
+15:23:36,978 h5py._conv DEBUG Creating converter from 7 to 5
+15:23:36,978 h5py._conv DEBUG Creating converter from 5 to 7
