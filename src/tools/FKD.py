@@ -5,11 +5,16 @@ import torch
 
 class LinearTransformStudent(nn.Module):
     def __init__(self, channel_in):
+        super(LinearTransformStudent, self).__init__()
+
         self.student_channel_wise = nn.Conv2d(channel_in, 3, 1)
-        self.fc = nn.Linear(channel_in, 256)
-        self.pooling = F.adaptive_avg_pool2d((1,1))
+        self.fc_block = nn.Sequential(
+            nn.Linear(channel_in, 256),
+            nn.ReLU()
+        )
+        self.pooling = nn.AdaptiveAvgPool2d((1, 1))
         self.channel_wise_pooling = nn.Conv2d(channel_in, 1, 1)
-        self.up = torch.nn.Upsample(size=(321, 201), mode='bilinear', align_corners=False)
+        self.up = torch.nn.Upsample(size=(321, 101), mode='bilinear', align_corners=False)
 
     def forward(self, feature):
         # (b, c, t, f) - > (b, c, 1, 1)
@@ -18,7 +23,7 @@ class LinearTransformStudent(nn.Module):
         b, c, _, _ = h_s.size()
         h_s = h_s.permute(0, 2, 3, 1).contiguous().view(b, 1, c)
         # (b, 1, c) -> (b, 1, 256)
-        h_s = self.fc(h_s)
+        h_s = self.fc_block(h_s)
 
         # upsampling (b, c, student_t, student_f) -> (b, c, teacher_t, teacher_f)
         features_upsampling = self.up(feature)
@@ -31,12 +36,14 @@ class LinearTransformStudent(nn.Module):
 
 class LinearTransformTeacher(nn.Module):
     def __init__(self, channel_in):
-        self.teacher_fc_block = nn.ModuleList([
+        super(LinearTransformTeacher, self).__init__()
+
+        self.teacher_fc_block = nn.Sequential(
             nn.Linear(channel_in, 256),
             nn.ReLU()
-        ])
+        )
 
-        self.pooling = F.adaptive_avg_pool2d((1,1))
+        self.pooling = nn.AdaptiveAvgPool2d((1, 1))
         self.teacher_channel_wise = nn.Conv2d(channel_in, 1, 1)
 
     def forward(self, feature):
@@ -56,13 +63,14 @@ class LinearTransformTeacher(nn.Module):
 class FKD(nn.Module):
     def __init__(self):
         super(FKD, self).__init__()
-        self.linear_transform_s_block = nn.ModuleList(
+        self.linear_transform_s_block = nn.ModuleList([
             LinearTransformStudent(256),
             LinearTransformStudent(128),
             LinearTransformStudent(64),
             LinearTransformStudent(32)
-        )
+        ])
         self.linear_transform_t = LinearTransformTeacher(64)
+        self.mse_loss = nn.MSELoss(reduction='none')
 
     def forward(self, teacher_feature, student_features):
         """

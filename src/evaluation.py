@@ -52,7 +52,7 @@ def enhance_one_track(model, audio_path, saved_dir, cut_len, n_fft=400, hop=100,
             import torch.nn.functional as F
             noisy_spec = F.pad(noisy_spec, (0, 0, 0, 1))
 
-        est_real, est_imag = model(noisy_spec)
+        est_real, est_imag, _ = model(noisy_spec)
         time_end = time.time()
         est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
 

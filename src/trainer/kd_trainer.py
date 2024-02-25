@@ -179,10 +179,10 @@ class KDTrainer(BaseTrainer):
         if mode == "student":
             # Runs the forward pass under autocast.
             with autocast(enabled = self.use_amp):
-                est_real, est_imag = self.model(noisy_spec)
+                est_real, est_imag, features = self.model(noisy_spec)
         else: # "teacher"
             with torch.no_grad():
-                est_real, est_imag = self.teacher_model(noisy_spec)
+                est_real, est_imag, features = self.teacher_model(noisy_spec)
 
         if self.use_amp:
             # output is float16 because linear layers autocast to float16.
@@ -207,6 +207,7 @@ class KDTrainer(BaseTrainer):
             "clean_imag": clean_imag,
             "clean_mag": clean_mag,
             "est_audio": est_audio,
+            "features": features
         }
 
     def calculate_generator_loss(self, generator_outputs):
@@ -244,7 +245,8 @@ class KDTrainer(BaseTrainer):
         return kd_loss
         
     def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
-        loss = self.FKD(teacher_generator_outputs['features'], student_generator_outputs['features'])
+        with autocast(enabled = self.use_amp):
+            loss = self.FKD(teacher_generator_outputs['features'], student_generator_outputs['features'])
         return loss.mean()
 
 
