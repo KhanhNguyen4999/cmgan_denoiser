@@ -8,8 +8,8 @@ import numpy as np
 import os
 from evaluation import evaluation_model
 from tools.compute_metrics import stoi
+from tools.FKD import FKD
 from augment import Remix
-from models import discriminator
 
 
 class KDTrainer(BaseTrainer):
@@ -92,7 +92,8 @@ class KDTrainer(BaseTrainer):
 
         if self.resume:
             self.reset()
-            
+
+        self.FKD = FKD().cuda()
 
     def gather(self, value: torch.tensor) -> Any:
         # gather value across devices - https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_gather
@@ -243,26 +244,8 @@ class KDTrainer(BaseTrainer):
         return kd_loss
         
     def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
-        # loss = self.knowledge_distillation_loss(student_generator_outputs["est_mag"],
-        #                                         teacher_generator_outputs['est_mag']) 
-        loss_mag = F.mse_loss(
-            student_generator_outputs["est_mag"], teacher_generator_outputs["est_mag"]
-        )
-        loss_ri = F.mse_loss(
-            student_generator_outputs["est_real"], teacher_generator_outputs["est_real"]
-        ) + F.mse_loss(student_generator_outputs["est_imag"], teacher_generator_outputs["est_imag"])
-
-        time_loss = torch.mean(
-            torch.abs(student_generator_outputs["est_audio"] - teacher_generator_outputs["est_audio"])
-        )
-
-        loss = (
-            self.loss_weights[0] * loss_ri
-            + self.loss_weights[1] * loss_mag
-            + self.loss_weights[2] * time_loss
-        )
-
-        return loss
+        loss = self.FKD(teacher_generator_outputs['features'], student_generator_outputs['features'])
+        return loss.mean()
 
 
     def train_step(self, batch):
