@@ -1,0 +1,79 @@
+[main]
+name = "CMGAN_fkd"
+seed = 42
+epochs = 150
+cut_len = 32000
+save_model_dir = "/home/duynk29/khanhnnm/checkpoint"
+
+# whether to use Automatic precision to speed up 
+use_amp = true 
+# whether to use ZeroRedundancyOptimizer https://pytorch.org/tutorials/recipes/zero_redundancy_optimizer.html
+use_ZeRo = false 
+
+# device_ids = "0,1,2"
+sr = 16000
+interval_eval = 5
+resume = true
+max_clip_grad_norm = 2.0 # torch.nn.utils.max_clip_grad_norm
+gradient_accumulation_steps = 1
+num_prints = 5
+
+# augmentation method
+[main.augment]
+remix = false
+
+# You can experiment on different weights for final loss combination
+[main.loss_weights]
+ri = 0.1
+mag = 0.9
+time = 0.2  
+gan =  0.05
+
+
+# Config model
+[model]
+type = "unet"
+num_channel = 3
+
+# Config feature
+[feature]
+n_fft = 400
+hop = 100
+ndf = 16
+
+
+[dataset_train]
+path = "/home/duynk29/khanhnnm/VCTK/test"
+[dataset_train.dataloader]
+batchsize = 16
+n_worker = 4
+pin_memory = true
+
+[dataset_train.sampler]
+shuffle = true 
+drop_last = true
+    
+[dataset_valid]
+path = "/home/duynk29/khanhnnm/VCTK/test"
+    
+[dataset_valid.dataloader]
+batchsize = 16
+n_worker = 4
+
+[dataset_valid.sampler]
+shuffle = false
+drop_last = false 
+
+[dataset_test]
+path = "/home/duynk29/khanhnnm/VCTK/test"
+
+
+[optimizer]
+init_lr = 5e-4
+
+[scheduler]
+decay_epoch = 30
+gamma = 0.5
+
+[trainer]
+path = "trainer.kd_trainer.KDTrainer"
