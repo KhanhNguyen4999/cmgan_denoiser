@@ -8,10 +8,9 @@ import numpy as np
 import os
 from evaluation import evaluation_model
 from tools.compute_metrics import stoi
-from tools.AKD import AKD
-from tools.AFD import AFD
-from tools.FAKD import FAKD
 from augment import Remix
+from data.dataloader import load_audio
+from tools.AFD import AFD
 
 
 class KDTrainer(BaseTrainer):
@@ -94,11 +93,10 @@ class KDTrainer(BaseTrainer):
             os.makedirs(self.save_enhanced_dir)
 
         if self.resume:
+            # self.load_best()
             self.reset()
-
-        # self.AFD = AFD(kd_args).cuda()
-        # self.AKD = AKD(kd_args).cuda()
-        self.FAKD = FAKD(kd_args).cuda()
+            
+        self.AFD = AFD(kd_args).cuda()
 
     def gather(self, value: torch.tensor) -> Any:
         # gather value across devices - https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_gather
@@ -137,6 +135,18 @@ class KDTrainer(BaseTrainer):
         model = package['best_state']
         tmp_path = os.path.join(self.save_model_dir, "best.th")
         torch.save(model, tmp_path)
+
+    def load_best(self):
+        self.logger.info("<<<<<<<<<<<<<<<<<< Load best loss >>>>>>>>>>>>>>>>>>")
+        state_dict = torch.load(self.save_model_dir + "/best.th")
+        from collections import OrderedDict
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            # name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
+            name = k
+            new_state_dict[name] = v
+
+        self.model.load_state_dict(new_state_dict)
 
     def reset(self):
         # self.dist.barrier()
@@ -181,14 +191,10 @@ class KDTrainer(BaseTrainer):
         clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
         clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
 
-        if mode == "student":
-            # Runs the forward pass under autocast.
-            with autocast(enabled = self.use_amp):
-                est_real, est_imag, features = self.model(noisy_spec)
-        else: # "teacher"
-            with torch.no_grad():
-                est_real, est_imag, features = self.teacher_model(noisy_spec)
-
+        # Runs the forward pass under autocast.
+        with autocast(enabled = self.use_amp):
+            est_real, est_imag, _ = self.model(noisy_spec)
+    
         if self.use_amp:
             # output is float16 because linear layers autocast to float16.
             # assert est_real.dtype is torch.float16, f"est_real's dtype is not torch.float16 but {est_real.dtype}"
@@ -212,7 +218,29 @@ class KDTrainer(BaseTrainer):
             "clean_imag": clean_imag,
             "clean_mag": clean_mag,
             "est_audio": est_audio,
-            "features": features
+        }
+    
+    def forward_generator_teacher_step(self, clean, enhance_audio):
+        enhance_spec = torch.stft(enhance_audio, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(), onesided=True)
+        enhance_spec = power_compress(enhance_spec)
+        enhance_real = enhance_spec[:, 0, :, :].unsqueeze(1)
+        enhance_imag = enhance_spec[:, 1, :, :].unsqueeze(1)
+        enhance_mag = torch.sqrt(enhance_real**2 + enhance_imag**2)
+
+        clean_spec = torch.stft(clean, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(), onesided=True)
+        clean_spec = power_compress(clean_spec)
+        clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
+        clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
+        clean_mag = torch.sqrt(clean_real**2 + clean_imag**2)
+
+        return {
+            "est_real": enhance_real,
+            "est_imag": enhance_imag,
+            "est_mag": enhance_mag,
+            "clean_real": clean_real,
+            "clean_imag": clean_imag,
+            "clean_mag": clean_mag,
+            "est_audio": enhance_audio,
         }
 
     def calculate_generator_loss(self, generator_outputs):
@@ -248,46 +276,46 @@ class KDTrainer(BaseTrainer):
         kd_loss = nn.KLDivLoss()(nn.functional.log_softmax(student_outputs / T, dim=1),
                                 nn.functional.softmax(teacher_outputs / T, dim=1)) * (alpha * T * T)
         return kd_loss
-
         
     def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
+        loss = self.knowledge_distillation_loss(student_generator_outputs["est_mag"],
+                                                teacher_generator_outputs['est_mag']) 
+        loss_mag = F.mse_loss(
+            student_generator_outputs["est_mag"], teacher_generator_outputs["est_mag"]
+        )
+        loss_ri = F.mse_loss(
+            student_generator_outputs["est_real"], teacher_generator_outputs["est_real"]
+        ) + F.mse_loss(student_generator_outputs["est_imag"], teacher_generator_outputs["est_imag"])
 
-        # loss_mag = F.mse_loss(
-        #     student_generator_outputs["est_mag"], teacher_generator_outputs["est_mag"]
-        # )
-        # loss_ri = F.mse_loss(
-        #     student_generator_outputs["est_real"], teacher_generator_outputs["est_real"]
-        # ) + F.mse_loss(student_generator_outputs["est_imag"], teacher_generator_outputs["est_imag"])
+        time_loss = torch.mean(
+            torch.abs(student_generator_outputs["est_audio"] - teacher_generator_outputs["est_audio"])
+        )
 
-        # time_loss = torch.mean(
-        #     torch.abs(student_generator_outputs["est_audio"] - teacher_generator_outputs["est_audio"])
-        # )
+        loss = (
+            self.loss_weights[0] * loss_ri
+            + self.loss_weights[1] * loss_mag
+            + self.loss_weights[2] * time_loss
+        )
 
-        # loss_logit = (
-        #     self.loss_weights[0] * loss_ri
-        #     + self.loss_weights[1] * loss_mag
-        #     + self.loss_weights[2] * time_loss
-        # )
-        
-        with autocast(enabled = self.use_amp):
-            # loss_feature = self.AFD(student_generator_outputs['features'], teacher_generator_outputs['features'])
-            # loss_feature = self.AKD(student_generator_outputs['features'], teacher_generator_outputs['features'])
-            loss_feature = self.FAKD(student_generator_outputs['features'], teacher_generator_outputs['features'])
-        
-        return loss_feature
+        # with autocast(enabled = self.use_amp):
+        #     loss_feature = self.AFD(student_generator_outputs['features'], teacher_generator_outputs['features'])
+
+        return loss
 
 
     def train_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
+        teacher_enhance = batch[2].cuda()
 
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
-        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
+        noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
+        noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
+
         
         student_generator_outputs = self.forward_generator_step(clean, noisy)
-        teacher_generator_outputs = self.forward_generator_step(clean, noisy, mode="teacher")
+        teacher_generator_outputs = self.forward_generator_teacher_step(clean, teacher_enhance)
 
         student_generator_outputs["clean"] = clean
 
@@ -298,7 +326,7 @@ class KDTrainer(BaseTrainer):
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
         assert kd_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {kd_loss.dtype}"
 
-        total_loss = loss + kd_loss * .05
+        total_loss = kd_loss
         # print("Loss: {} - KDloss: {}".format(loss, kd_loss))
         self.scaler.scale(total_loss).backward(retain_graph=True)
 
@@ -306,7 +334,7 @@ class KDTrainer(BaseTrainer):
         # average over devices in ddp
         if self.n_gpus > 1:
             loss = self.gather(loss).mean()
-            kd_loss = self.gather(kd_loss).mean()
+            kd_loss = self.gather(loss).mean()
 
         return loss.item(), kd_loss.item()
 
@@ -394,21 +422,23 @@ class KDTrainer(BaseTrainer):
             # Save checkpoint
             self.serialize(epoch)
 
-        self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
+        # self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
         self.scheduler.step()
 
     @torch.no_grad()
     def test_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
+        teacher_enhance = batch[2].cuda()
 
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
-        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
+        noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
+        noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
+
         
         student_generator_outputs = self.forward_generator_step(clean, noisy)
-        teacher_generator_outputs = self.forward_generator_step(clean, noisy, mode="teacher")
+        teacher_generator_outputs = self.forward_generator_teacher_step(clean, teacher_enhance)
 
         student_generator_outputs["clean"] = clean
 
@@ -419,11 +449,13 @@ class KDTrainer(BaseTrainer):
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
         assert kd_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {kd_loss.dtype}"
 
+        total_loss = loss + kd_loss
+
         # Logging
         # average over devices in ddp
         if self.n_gpus > 1:
             loss = self.gather(loss).mean()
-            kd_loss = self.gather(kd_loss).mean()
+            kd_loss = self.gather(loss).mean()
 
         return loss.item(), kd_loss.item()
 

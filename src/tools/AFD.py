@@ -21,20 +21,6 @@ class nn_bn_relu(nn.Module):
         return self.bn(self.linear(x))
 
 
-# class AFD(nn.Module):
-#     def __init__(self, args):
-#         super(AFD, self).__init__()
-#         self.guide_layers = args.guide_layers
-#         self.hint_layers = args.hint_layers
-#         self.attention = Attention(args)
-
-#     def forward(self, g_s, g_t):
-#         g_t = [g_t[i] for i in self.guide_layers]
-#         g_s = [g_s[i] for i in self.hint_layers]
-#         loss = self.attention(g_s, g_t)
-#         return sum(loss)
-
-
 class AFD(nn.Module):
     def __init__(self, args):
         super(AFD, self).__init__()
@@ -78,15 +64,18 @@ class LinearTransformTeacher(nn.Module):
     def __init__(self, args):
         super(LinearTransformTeacher, self).__init__()
         self.query_layer = nn.ModuleList([nn_bn_relu(t_shape[1], args.qk_dim) for t_shape in args.t_shapes])
+        self.channel_wise_operation = nn.ModuleList([nn.Conv2d(t_shape[1], 1, (3,3), padding=1) for t_shape in args.t_shapes])
 
     def forward(self, g_t):
         bs = g_t[0].size(0)
         channel_mean = [f_t.mean(3).mean(2) for f_t in g_t]
-        spatial_mean = [f_t.pow(2).mean(1).view(bs, -1) for f_t in g_t]
+        spatial_mean = [operation(g_t[i]).view(bs, -1) for i, operation in enumerate(self.channel_wise_operation)] 
+        # spatial_mean = [f_t.pow(2).mean(1).view(bs, -1) for f_t in g_t]
+
         query = torch.stack([query_layer(f_t, relu=False) for f_t, query_layer in zip(channel_mean, self.query_layer)],
                             dim=1)
-        value = [F.normalize(f_s, dim=1) for f_s in spatial_mean]
-        return query, value
+        # value = [F.normalize(f_s, dim=1) for f_s in spatial_mean]
+        return query, spatial_mean
 
 
 class LinearTransformStudent(nn.Module):
@@ -96,29 +85,30 @@ class LinearTransformStudent(nn.Module):
         self.s = len(args.s_shapes)
         self.qk_dim = args.qk_dim
         self.relu = nn.ReLU(inplace=False)
-        self.samplers = nn.ModuleList([Sample(t_shape) for t_shape in args.t_shapes])
+        self.samplers = nn.ModuleList([Sample(t_shape, args) for t_shape in args.t_shapes])
 
         self.key_layer = nn.ModuleList([nn_bn_relu(s_shape[1], self.qk_dim) for s_shape in args.s_shapes])
         self.bilinear = nn_bn_relu(args.qk_dim, args.qk_dim * len(args.t_shapes))
 
     def forward(self, g_s):
         bs = g_s[0].size(0)
-        channel_mean = [f_s.mean(3).mean(2) for f_s in g_s] # có cần thay bằng conv2d?
+        channel_mean = [f_s.mean(3).mean(2) for f_s in g_s]
         spatial_mean = [sampler(g_s, bs) for sampler in self.samplers]
 
         key = torch.stack([key_layer(f_s) for key_layer, f_s in zip(self.key_layer, channel_mean)],
                                      dim=1).view(bs * self.s, -1)  # Bs x h
         bilinear_key = self.bilinear(key, relu=False).view(bs, self.s, self.t, -1)
-        value = [F.normalize(s_m, dim=2) for s_m in spatial_mean]
-        return bilinear_key, value
+        # value = [F.normalize(s_m, dim=2) for s_m in spatial_mean]
+        return bilinear_key, spatial_mean
 
 
 class Sample(nn.Module):
-    def __init__(self, t_shape):
+    def __init__(self, t_shape, args):
         super(Sample, self).__init__()
         t_N, t_C, t_H, t_W = t_shape
         self.up = torch.nn.Upsample(size=(t_H, t_W), mode='bilinear', align_corners=False)
+        self.channel_wise_operation = nn.ModuleList([nn.Conv2d(s_shape[1], 1, (3,3), padding=1) for s_shape in args.s_shapes])
 
     def forward(self, g_s, bs):
-        g_s = torch.stack([self.up(f_s.mean(1, keepdim=True)).view(bs, -1) for f_s in g_s], dim=1)
+        g_s = torch.stack([self.up(operation(g_s[i])).view(bs, -1) for i, operation in enumerate(self.channel_wise_operation)], dim=1)
         return g_s

@@ -176,7 +176,7 @@ class UTrainer(BaseTrainer):
         
         # Runs the forward pass under autocast.
         with autocast(enabled = self.use_amp):
-            est_real, est_imag = self.model(noisy_spec)
+            est_real, est_imag, _ = self.model(noisy_spec)
         
 
         if self.use_amp:

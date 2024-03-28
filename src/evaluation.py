@@ -98,7 +98,7 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
     audio_list = os.listdir(noisy_dir)
     audio_list = natsorted(audio_list)
     
-    ls_est_audio = Parallel(n_jobs=2, prefer="threads")(
+    ls_est_audio = Parallel(n_jobs=1, prefer="threads")(
                 delayed(enhance_one_track)(model, 
                                             os.path.join(noisy_dir, audio),
                                             saved_dir,
@@ -203,5 +203,5 @@ if __name__ == '__main__':
         noisy_dir = os.path.join(args.test_dir, 'noisy')
         clean_dir = os.path.join(args.test_dir, 'clean')
         load_from_checkpoint = True
-        args.save_tracks = False
+        args.save_tracks = True
         evaluation(args.model_path, noisy_dir, clean_dir, args.save_tracks, args.save_dir)

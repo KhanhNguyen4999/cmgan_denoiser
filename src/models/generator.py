@@ -64,11 +64,14 @@ class TSCB(nn.Module):
     def forward(self, x_in):
         b, c, t, f = x_in.size()
         x_t = x_in.permute(0, 3, 2, 1).contiguous().view(b*f, t, c)
-        x_t = self.time_conformer(x_t) + x_t
+        x, attn_t = self.time_conformer(x_t) 
+        x_t = x + x_t
+
         x_f = x_t.view(b, f, t, c).permute(0, 2, 1, 3).contiguous().view(b*t, f, c)
-        x_f = self.freq_conformer(x_f) + x_f
+        x, attn_f = self.freq_conformer(x_f)
+        x_f = x + x_f
         x_f = x_f.view(b, t, f, c).permute(0, 3, 1, 2)
-        return x_f
+        return x_f, (attn_t, attn_f)
 
 
 class SPConvTranspose2d(nn.Module):
@@ -145,10 +148,10 @@ class TSCNet(nn.Module):
         x_in = torch.cat([mag, x], dim=1)
 
         out_1 = self.dense_encoder(x_in)
-        out_2 = self.TSCB_1(out_1)
-        out_3 = self.TSCB_2(out_2)
-        out_4 = self.TSCB_3(out_3)
-        out_5 = self.TSCB_4(out_4)
+        out_2, _ = self.TSCB_1(out_1)
+        out_3, _ = self.TSCB_2(out_2)
+        out_4, _ = self.TSCB_3(out_3)
+        out_5, attn_5 = self.TSCB_4(out_4)
 
         mask = self.mask_decoder(out_5)
         out_mag = mask * mag
@@ -159,4 +162,4 @@ class TSCNet(nn.Module):
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag, [out_5]
+        return final_real, final_imag, [out_2, out_3, out_4, out_5]

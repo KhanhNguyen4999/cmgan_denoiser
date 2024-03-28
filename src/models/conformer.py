@@ -218,8 +218,9 @@ class ConformerBlock(nn.Module):
 
     def forward(self, x, mask = None):
         x = self.ff1(x) + x
-        x = self.attn(x, mask = mask) + x
+        attn = self.attn(x, mask = mask)
+        x = attn + x
         x = self.conv(x) + x
         x = self.ff2(x) + x
         x = self.post_norm(x)
-        return x
+        return x, attn

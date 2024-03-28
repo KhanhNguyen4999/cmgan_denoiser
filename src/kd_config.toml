@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_AFD"
+name = "CMGAN_unet_32_kd_KAKD_fusion_kd_weight0.05"
 seed = 42
 epochs = 150
 cut_len = 32000
@@ -43,7 +43,7 @@ ndf = 16
 
 
 [dataset_train]
-path = "/home/duynk29/khanhnnm/VCTK/test"
+path = "/home/duynk29/khanhnnm/VCTK/train"
 [dataset_train.dataloader]
 batchsize = 16
 n_worker = 4
@@ -69,10 +69,11 @@ path = "/home/duynk29/khanhnnm/VCTK/test"
 
 
 [optimizer]
-init_lr = 5e-4
+init_lr = 5e-3
 
 [scheduler]
-decay_epoch = 30
+
+decay_epoch = 20
 gamma = 0.5
 
 [trainer]

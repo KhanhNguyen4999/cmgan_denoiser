@@ -32,37 +32,11 @@ def set_seed(seed: int = 42) -> None:
     torch.cuda.manual_seed_all(seed)
     # When running on the CuDNN backend, two further options must be set
     torch.backends.cudnn.deterministic = True
+    # torch.use_deterministic_algorithms(True, warn_only=True)
     torch.backends.cudnn.benchmark = False
     # Set a fixed value for the hash seed
     os.environ["PYTHONHASHSEED"] = str(seed)
     print(f"Random seed set as {seed}")
-
-# def set_seed(seed):
-#     """Sets random seeds for reproducibility in distributed training.
-
-#     Args:
-#         seed: The integer value for the random seed.
-#     """
-
-#     # Set seed for main process
-#     torch.manual_seed(seed)
-
-#     # If using distributed training, synchronize seed across processes
-#     if torch.distributed.is_available() and torch.distributed.is_initialized():
-#         print("---------- Set random seed for torch distributed training - seed: ", seed)
-#         torch.distributed.broadcast(torch.tensor(seed), 0)
-#         # Worker processes can access the broadcasted seed from here
-#         worker_seed = torch.distributed.get_rank() * int(1e4) + seed
-#         torch.manual_seed(worker_seed)
-#         np.random.seed(worker_seed)
-#         random.seed(worker_seed)
-#         torch.cuda.manual_seed(worker_seed)
-#         # When running on the CuDNN backend, two further options must be set
-#         torch.backends.cudnn.deterministic = True
-#         torch.backends.cudnn.benchmark = False
-#         # Set a fixed value for the hash seed
-#         os.environ["PYTHONHASHSEED"] = str(worker_seed)
-#         print(f"Random seed set as {worker_seed}")
 
 
 def cleanup():
@@ -86,15 +60,7 @@ def load_state_dict_from_checkpoint(checkpoint_path):
         new_state_dict[name] = v
     return new_state_dict
 
-def entry(rank, world_size, config, args):
-    # init distributed training
-    # os.environ["CUDA_VISIBLE_DEVICES"] = config["main"]["device_ids"]
-    os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
-    setup(rank, world_size)
-    if rank == 0:
-        # fix random seed for reproducing
-        set_seed(config["main"]["seed"])
-
+def entry(world_size, config, args):
     ## load config
     # train
     epochs = config["main"]["epochs"]
@@ -123,22 +89,16 @@ def entry(rank, world_size, config, args):
     cut_len = int(config["main"]["cut_len"])
     save_model_dir = os.path.join(config["main"]["save_model_dir"], config["main"]['name'] + '/checkpoints')
 
-    if rank == 0:
-        if not os.path.exists(save_model_dir):
-            os.makedirs(save_model_dir)
-        # Store config file
-        config_name = strftime("%Y-%m-%d %H:%M:%S", gmtime()).replace(' ', '_') + '.toml'
-        with open(os.path.join(config["main"]["save_model_dir"], config["main"]['name'] + '/' + config_name), 'w+') as f:
-            toml.dump(config, f)
-            f.close()
+    if not os.path.exists(save_model_dir):
+        os.makedirs(save_model_dir)
+    # Store config file
+    config_name = strftime("%Y-%m-%d %H:%M:%S", gmtime()).replace(' ', '_') + '.toml'
+    with open(os.path.join(config["main"]["save_model_dir"], config["main"]['name'] + '/' + config_name), 'w+') as f:
+        toml.dump(config, f)
+        f.close()
 
     log_dir = save_model_dir
-    logger = get_logger(log_dir=log_dir, log_name="train.log", resume=resume, is_rank0=rank==0)
-
-    logger.info(f"Argument: {args}")
-
-    # This should be needed to be reproducible https://discuss.pytorch.org/t/setting-seed-in-torch-ddp/126638
-    config["main"]["seed"] += rank 
+    logger = get_logger(log_dir=log_dir, log_name="train.log", resume=resume, is_rank0=True)
 
     # Create train dataloader
     train_ds = dataloader2.load_data(    
@@ -147,7 +107,6 @@ def entry(rank, world_size, config, args):
                                         batch_size = config['dataset_train']['dataloader']['batchsize'], 
                                         n_cpu = config['dataset_train']['dataloader']['n_worker'], 
                                         cut_len = cut_len, 
-                                        rank = rank, 
                                         world_size = world_size,
                                         shuffle = config['dataset_train']['sampler']['shuffle']
                                     )
@@ -158,7 +117,6 @@ def entry(rank, world_size, config, args):
                                         batch_size = config['dataset_valid']['dataloader']['batchsize'], 
                                         n_cpu = config['dataset_valid']['dataloader']['n_worker'], 
                                         cut_len = cut_len, 
-                                        rank = rank, 
                                         world_size = world_size,
                                         shuffle = config['dataset_valid']['sampler']['shuffle']
                                     )
@@ -175,16 +133,10 @@ def entry(rank, world_size, config, args):
     teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
     teacher_model.load_state_dict(state_dict)
     
-    # Distributed model
-    model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
-    teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
-
-
-    if rank == 0:
-        logger.info(f"---------- Summary for student model")
-        summary(model, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
-        logger.info(f"----------Summary for Teacher model")
-        summary(teacher_model, [(2, 2, cut_len//hop+1, int(n_fft/2)+1)])
+    logger.info(f"---------- Summary for student model")
+    summary(model, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
+    logger.info(f"----------Summary for Teacher model")
+    summary(teacher_model, [(2, 2, cut_len//hop+1, int(n_fft/2)+1)])
     
     # optimizer
     if config['main']['use_ZeRo']:
@@ -213,7 +165,7 @@ def entry(rank, world_size, config, args):
     
     trainer = trainer_class(
         dist = dist,
-        rank = rank,
+        rank = 0,
         resume = resume,
         n_gpus = world_size,
         epochs = epochs,
@@ -254,6 +206,9 @@ def entry(rank, world_size, config, args):
 
 if __name__ == '__main__':
 
+    seed = 42  # Adjust seed value as needed
+    set_seed(seed)
+
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config", required=False, 
                                         type=str, 
@@ -266,25 +221,26 @@ if __name__ == '__main__':
 
     # kd argument
     
-  
-    args.s_shapes = [(16, 64, 160, 100), (16, 128, 80, 50), (16, 256, 40, 25)]
-    args.t_shapes = [(16, 64, 321, 101), (16, 64, 321, 101), (16, 64, 321, 101)]
+    args.s_shapes = [(16, 256, 40, 25), (16, 128, 80, 50), (16, 64, 160, 100), (16, 32, 321, 201)]
+    args.t_shapes = [(16, 64, 321, 101), (16, 64, 321, 101), (16, 64, 321, 101), (16, 64, 321, 101)]
     args.qk_dim = 512
 
+    print(args)
     available_gpus = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
     print("GPU list:", available_gpus)
     args.n_gpus = len(available_gpus)
     print("Number of gpu:", args.n_gpus)
 
-    try: 
-        mp.spawn(entry,
-                args=(args.n_gpus, config, args),
-                nprocs=args.n_gpus,
-                join=True)
-    except KeyboardInterrupt:
-        print('Interrupted')
-        try: 
-            dist.destroy_process_group()  
-        except KeyboardInterrupt: 
-            os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ")
+    entry(args.n_gpus, config, args)
+    # try: 
+    #     mp.spawn(entry,
+    #             args=(args.n_gpus, config, args),
+    #             nprocs=args.n_gpus,
+    #             join=True)
+    # except KeyboardInterrupt:
+    #     print('Interrupted')
+    #     try: 
+    #         dist.destroy_process_group()  
+    #     except KeyboardInterrupt: 
+    #         os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ")
     

@@ -23,3 +23,68 @@
 15:23:36,978 h5py._conv DEBUG Creating converter from 5 to 7
 15:23:36,978 h5py._conv DEBUG Creating converter from 7 to 5
 15:23:36,978 h5py._conv DEBUG Creating converter from 5 to 7
+18:10:23,32 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+18:10:23,32 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+18:10:58,188 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+18:10:58,189 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+18:11:04,468 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+18:11:04,710 h5py._conv DEBUG Creating converter from 7 to 5
+18:11:04,710 h5py._conv DEBUG Creating converter from 5 to 7
+18:11:04,710 h5py._conv DEBUG Creating converter from 7 to 5
+18:11:04,710 h5py._conv DEBUG Creating converter from 5 to 7
+21:22:07,360 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+21:22:07,360 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+21:22:13,744 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+21:22:14,30 h5py._conv DEBUG Creating converter from 7 to 5
+21:22:14,30 h5py._conv DEBUG Creating converter from 5 to 7
+21:22:14,30 h5py._conv DEBUG Creating converter from 7 to 5
+21:22:14,30 h5py._conv DEBUG Creating converter from 5 to 7
+23:50:59,907 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+23:50:59,907 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+23:51:06,575 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+23:51:06,859 h5py._conv DEBUG Creating converter from 7 to 5
+23:51:06,859 h5py._conv DEBUG Creating converter from 5 to 7
+23:51:06,859 h5py._conv DEBUG Creating converter from 7 to 5
+23:51:06,859 h5py._conv DEBUG Creating converter from 5 to 7
+00:04:47,620 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+00:04:47,621 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+00:04:55,826 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+00:04:56,212 h5py._conv DEBUG Creating converter from 7 to 5
+00:04:56,212 h5py._conv DEBUG Creating converter from 5 to 7
+00:04:56,212 h5py._conv DEBUG Creating converter from 7 to 5
+00:04:56,212 h5py._conv DEBUG Creating converter from 5 to 7
+00:11:36,795 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+00:11:36,795 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+00:11:43,36 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+00:11:43,297 h5py._conv DEBUG Creating converter from 7 to 5
+00:11:43,297 h5py._conv DEBUG Creating converter from 5 to 7
+00:11:43,297 h5py._conv DEBUG Creating converter from 7 to 5
+00:11:43,298 h5py._conv DEBUG Creating converter from 5 to 7
+00:14:29,181 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+00:14:29,181 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+00:14:37,303 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+00:14:37,654 h5py._conv DEBUG Creating converter from 7 to 5
+00:14:37,654 h5py._conv DEBUG Creating converter from 5 to 7
+00:14:37,654 h5py._conv DEBUG Creating converter from 7 to 5
+00:14:37,654 h5py._conv DEBUG Creating converter from 5 to 7
+00:20:55,808 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+00:20:55,809 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+00:21:04,76 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+00:21:04,435 h5py._conv DEBUG Creating converter from 7 to 5
+00:21:04,435 h5py._conv DEBUG Creating converter from 5 to 7
+00:21:04,435 h5py._conv DEBUG Creating converter from 7 to 5
+00:21:04,435 h5py._conv DEBUG Creating converter from 5 to 7
+00:21:41,724 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+00:21:41,724 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+00:21:47,725 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+00:21:47,974 h5py._conv DEBUG Creating converter from 7 to 5
+00:21:47,974 h5py._conv DEBUG Creating converter from 5 to 7
+00:21:47,974 h5py._conv DEBUG Creating converter from 7 to 5
+00:21:47,974 h5py._conv DEBUG Creating converter from 5 to 7
+01:13:55,20 torch.distributed.distributed_c10d INFO Added key: store_based_barrier_key:1 to store for rank: 0
+01:13:55,20 torch.distributed.distributed_c10d INFO Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
+01:14:01,396 tensorflow DEBUG Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+01:14:01,638 h5py._conv DEBUG Creating converter from 7 to 5
+01:14:01,638 h5py._conv DEBUG Creating converter from 5 to 7
+01:14:01,638 h5py._conv DEBUG Creating converter from 7 to 5
+01:14:01,638 h5py._conv DEBUG Creating converter from 5 to 7

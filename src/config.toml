@@ -1,12 +1,12 @@
 [main]
-name = "CMGAN_unet"
+name = "CMGAN_unet_bilinear_48_dense_decoder_fast_trainer_not_amp"
 seed = 42
 epochs = 150
 cut_len = 32000
-save_model_dir = "./save_model"
+save_model_dir = "/home/duynk29/khanhnnm/checkpoint"
 
 # whether to use Automatic precision to speed up 
-use_amp = true 
+use_amp = false
 # whether to use ZeroRedundancyOptimizer https://pytorch.org/tutorials/recipes/zero_redundancy_optimizer.html
 use_ZeRo = false 
 
@@ -43,9 +43,9 @@ ndf = 16
 
 
 [dataset_train]
-path = "/content/drive/MyDrive/data/VCTK/test"
+path = "/home/duynk29/khanhnnm/VCTK/train"
 [dataset_train.dataloader]
-batchsize = 4
+batchsize = 16
 n_worker = 4
 pin_memory = true
 
@@ -54,10 +54,10 @@ shuffle = true
 drop_last = true
     
 [dataset_valid]
-path = "/content/drive/MyDrive/data/VCTK/test"
+path = "/home/duynk29/khanhnnm/VCTK/test"
     
 [dataset_valid.dataloader]
-batchsize = 4
+batchsize = 16
 n_worker = 4
 
 [dataset_valid.sampler]
@@ -65,14 +65,14 @@ shuffle = false
 drop_last = false 
 
 [dataset_test]
-path = "/content/drive/MyDrive/data/VCTK/test"
+path = "/home/duynk29/khanhnnm/VCTK/test"
 
 
 [optimizer]
-init_lr = 5e-4
+init_lr = 5e-3
 
 [scheduler]
-decay_epoch = 30
+decay_epoch = 20
 gamma = 0.5
 
 [trainer]
