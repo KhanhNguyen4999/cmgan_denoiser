@@ -267,8 +267,9 @@ if __name__ == '__main__':
     # kd argument
     
   
-    args.s_shapes = [(16, 64, 160, 100), (16, 128, 80, 50), (16, 256, 40, 25)]
-    args.t_shapes = [(16, 64, 321, 101), (16, 64, 321, 101), (16, 64, 321, 101)]
+    # args.s_shapes = [(16, 64, 160, 100), (16, 128, 80, 50), (16, 256, 40, 25)]
+    args.s_shapes = [(16, 64, 160, 100), (16, 128, 80, 50), (16, 256, 40, 25), (16, 256, 40, 25)]
+    args.t_shapes = [(16, 64, 321, 101), (16, 64, 321, 101), (16, 64, 321, 101), (16, 64, 321, 101)]
     args.qk_dim = 512
 
     available_gpus = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]

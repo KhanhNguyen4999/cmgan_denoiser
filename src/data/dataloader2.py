@@ -20,7 +20,7 @@ def load_audio(audio_path, offset, num_frames):
                                 num_frames=num_frames or -1)
     else:
         out, sr = torchaudio.load(audio_path, 
-                                offset=offset, 
+                                frame_offset=offset, 
                                 num_frames=num_frames)
     return out
 

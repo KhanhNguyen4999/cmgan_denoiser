@@ -51,8 +51,9 @@ def power_uncompress(real, imag):
     phase = torch.angle(spec)
     mag = mag**(1./0.3)
     real_compress = mag * torch.cos(phase)
-    imag_compress = mag * torch.sin(phase)
-    return torch.stack([real_compress, imag_compress], -1)
+    imag_compress = mag * torch.sin(phase)    
+    # return torch.stack([real_compress, imag_compress], -1)
+    return torch.complex(real_compress, imag_compress)
 
 def set_seed(seed):
     torch.manual_seed(seed)

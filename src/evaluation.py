@@ -44,7 +44,10 @@ def enhance_one_track(model, audio_path, saved_dir, cut_len, n_fft=400, hop=100,
                 batch_size += 1
             noisy = torch.reshape(noisy, (batch_size, -1))
 
-        noisy_spec = torch.stft(noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True)
+        noisy_spec = torch.view_as_real(torch.stft(noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), 
+                                                   onesided=True, 
+                                                   return_complex=True))
+        
         noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
         time_start = time.time()
         

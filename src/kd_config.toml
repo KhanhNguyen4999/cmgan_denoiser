@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_32_kd_KAKD_fusion_kd_weight0.05"
+name = "CMGAN_unet_32_kd_AFD_full_layer_0.3"
 seed = 42
 epochs = 150
 cut_len = 32000

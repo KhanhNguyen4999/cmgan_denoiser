@@ -6,6 +6,7 @@ from utils import *
 from typing import Any
 import numpy as np
 import os
+import json
 from evaluation import evaluation_model
 from tools.compute_metrics import stoi
 from tools.AKD import AKD
@@ -93,12 +94,16 @@ class KDTrainer(BaseTrainer):
         if not os.path.exists(self.save_enhanced_dir):
             os.makedirs(self.save_enhanced_dir)
 
+        self.attn_weight_store_dir = f'{self.save_model_dir}/attn_weight'
+        if not os.path.isdir(self.attn_weight_store_dir):
+            os.makedirs(self.attn_weight_store_dir)
+
         if self.resume:
             self.reset()
 
-        # self.AFD = AFD(kd_args).cuda()
+        self.AFD = AFD(kd_args).cuda()
         # self.AKD = AKD(kd_args).cuda()
-        self.FAKD = FAKD(kd_args).cuda()
+        # self.FAKD = FAKD(kd_args).cuda()
 
     def gather(self, value: torch.tensor) -> Any:
         # gather value across devices - https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_gather
@@ -172,10 +177,13 @@ class KDTrainer(BaseTrainer):
             noise, clean = sources
             noisy = noise + clean
 
-        noisy_spec = torch.stft(noisy, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
-                                onesided=True)
-        clean_spec = torch.stft(clean, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
-                                onesided=True)
+        noisy_spec = torch.view_as_real(torch.stft(noisy, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
+                                onesided=True,
+                                return_complex=True))
+        clean_spec = torch.view_as_real(torch.stft(clean, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
+                                onesided=True,
+                                return_complex=True))
+        
         noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
         clean_spec = power_compress(clean_spec)
         clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
@@ -200,6 +208,7 @@ class KDTrainer(BaseTrainer):
         clean_mag = torch.sqrt(clean_real**2 + clean_imag**2)
 
         est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
+        # est_spec_uncompress = torch.complex(est_real, est_imag).squeeze(1)
         est_audio = torch.istft(est_spec_uncompress, self.n_fft, self.hop,
                                     window=torch.hamming_window(self.n_fft).cuda(), onesided=True)
 
@@ -270,14 +279,14 @@ class KDTrainer(BaseTrainer):
         # )
         
         with autocast(enabled = self.use_amp):
-            # loss_feature = self.AFD(student_generator_outputs['features'], teacher_generator_outputs['features'])
+            loss_feature, attn_map = self.AFD(student_generator_outputs['features'], teacher_generator_outputs['features'])
             # loss_feature = self.AKD(student_generator_outputs['features'], teacher_generator_outputs['features'])
-            loss_feature = self.FAKD(student_generator_outputs['features'], teacher_generator_outputs['features'])
+            # loss_feature = self.FAKD(student_generator_outputs['features'], teacher_generator_outputs['features'])
         
-        return loss_feature
+        return loss_feature, attn_map
 
 
-    def train_step(self, batch):
+    def train_step(self, batch, epoch, id_step):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
 
@@ -292,13 +301,19 @@ class KDTrainer(BaseTrainer):
         student_generator_outputs["clean"] = clean
 
         loss = self.calculate_generator_loss(student_generator_outputs)
-        kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
+        kd_loss, attn_map = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
+
+        if id_step == 0:
+            file_path = f'{self.attn_weight_store_dir}/attn_weight_{epoch}.json'
+            with open(file_path, 'w') as f:
+                json.dump(attn_map.tolist(), f)
+            
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
         assert kd_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {kd_loss.dtype}"
 
-        total_loss = loss + kd_loss * .05
+        total_loss = loss + kd_loss * .3
         # print("Loss: {} - KDloss: {}".format(loss, kd_loss))
         self.scaler.scale(total_loss).backward(retain_graph=True)
 
@@ -324,7 +339,7 @@ class KDTrainer(BaseTrainer):
         logprog = LogProgress(self.logger, self.train_ds, updates=self.num_prints, name=name)
 
         for idx, batch in enumerate(logprog):
-            se_loss, kd_loss = self.train_step(batch)
+            se_loss, kd_loss = self.train_step(batch, epoch, idx)
             loss = se_loss + kd_loss
             loss_train.append(loss)
             kd_loss_train.append(kd_loss)
@@ -413,7 +428,7 @@ class KDTrainer(BaseTrainer):
         student_generator_outputs["clean"] = clean
 
         loss = self.calculate_generator_loss(student_generator_outputs)
-        kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
+        kd_loss, _ = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"

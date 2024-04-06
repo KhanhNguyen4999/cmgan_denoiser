@@ -52,7 +52,7 @@ class AFD(nn.Module):
             diff = self.cal_diff(h_hat_s, h_t, atts[:, i])
             loss += diff
 
-        return loss
+        return loss, atts
 
     def cal_diff(self, v_s, v_t, att):
         diff = (v_s - v_t.unsqueeze(1)).pow(2).mean(2)

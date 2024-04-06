@@ -66,17 +66,17 @@ class FAKD(nn.Module):
     def fusion_loss(self, student_layer, teacher_layer, n):
         if n == self.n_layer - 1:
             fusion_feature, _ = self.ABF_blocks[n](student_layer[n])
-            fusion_feature = self.channel_wise_operation_student[n](fusion_feature)
-            teacher_feature = self.channel_wise_operation_teacher[n](teacher_layer[n])
-            loss = F.mse_loss(fusion_feature, teacher_feature)
+            fusion_feature_wise = self.channel_wise_operation_student[n](fusion_feature)
+            teacher_feature_wise = self.channel_wise_operation_teacher[n](teacher_layer[n])
+            loss = F.mse_loss(fusion_feature_wise, teacher_feature_wise)
             return loss, fusion_feature
         
         loss, residual_feature = self.fusion_loss(student_layer, teacher_layer, n+1)
         curr_fusion_features, _ = self.ABF_blocks[n](student_layer[n], residual_feature) 
 
-        fusion_feature = self.channel_wise_operation_student[n](curr_fusion_features)
-        teacher_feature = self.channel_wise_operation_teacher[n](teacher_layer[n])
-        curr_loss = F.mse_loss(fusion_feature, teacher_feature)
+        fusion_feature_wise = self.channel_wise_operation_student[n](curr_fusion_features)
+        teacher_feature_wise = self.channel_wise_operation_teacher[n](teacher_layer[n])
+        curr_loss = F.mse_loss(fusion_feature_wise, teacher_feature_wise)
         return loss + curr_loss,  curr_fusion_features
     
     def forward(self, g_s, g_t):
