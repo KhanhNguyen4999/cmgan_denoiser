@@ -3,6 +3,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class BLSTM(nn.Module):
+    def __init__(self, dim, layers=2, bi=True):
+        super().__init__()
+        klass = nn.LSTM
+        self.lstm = klass(bidirectional=bi, num_layers=layers, hidden_size=dim, input_size=dim)
+        self.linear = None
+        if bi:
+            self.linear = nn.Linear(2 * dim, dim)
+
+    def forward(self, x, hidden=None):
+        x, hidden = self.lstm(x, hidden)
+        if self.linear:
+            x = self.linear(x)
+        return x, hidden
+
+
 class DilatedDenseNet(nn.Module):
     def __init__(self, depth=4, in_channels=64):
         super(DilatedDenseNet, self).__init__()
@@ -202,6 +218,9 @@ class UNet(nn.Module):
 
         self.mask_decoder = MaskDecoder(201, num_channel=32, out_channel=1)
         self.complex_decoder = ComplexDecoder(num_channel=32)
+        # (B, 256, 40, 25) -> (B, C, T, F) -> (T, B*F, C)
+        self.t_lstm = BLSTM(256, bi=not True)
+        self.f_lstm = BLSTM(256, bi=not True)
 
     def forward(self, mix):
         '''
@@ -216,6 +235,14 @@ class UNet(nn.Module):
         x3 = self.down2(x2)
         x4 = self.down3(x3)
         x5 = self.down4(x4)
+
+        b, c, t, f = x5.size()
+        x5 = x5.permute(2, 0, 3, 1).contiguous().view(t, b*f, c)
+        x5, _ = self.t_lstm(x5)
+        x5 = x5.view(t, b, f, c).permute(2, 1, 0, 3).contiguous().view(f, b*t, c)
+        x5, _ = self.f_lstm(x5)
+        x5 = x5.view(f, b, t, c).permute(1, 3, 2, 0)
+
         x = self.up1(x5, x4)
         x = self.up2(x, x3)
         x = self.up3(x, x2)
@@ -232,4 +259,4 @@ class UNet(nn.Module):
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag, [x2, x3, x4, x5]
+        return final_real, final_imag, [x4]

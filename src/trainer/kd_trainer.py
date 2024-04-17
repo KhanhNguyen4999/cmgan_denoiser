@@ -44,6 +44,7 @@ class KDTrainer(BaseTrainer):
                 tsb_writer,
                 num_prints,
                 logger,
+                kd_weight,
                 kd_args
             ):
 
@@ -65,7 +66,8 @@ class KDTrainer(BaseTrainer):
         self.optimizer = optimizer
         self.batch_size = batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
-        
+        self.kd_weight = kd_weight
+
         self.scheduler = scheduler
 
         self.loss_weights = loss_weights
@@ -313,7 +315,7 @@ class KDTrainer(BaseTrainer):
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
         assert kd_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {kd_loss.dtype}"
 
-        total_loss = loss + kd_loss * .3
+        total_loss = loss + kd_loss * self.kd_weight
         # print("Loss: {} - KDloss: {}".format(loss, kd_loss))
         self.scaler.scale(total_loss).backward(retain_graph=True)
 

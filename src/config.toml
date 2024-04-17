@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_bilinear_48_dense_decoder_fast_trainer_not_amp"
+name = "CMGAN_unet_bilinear_32"
 seed = 42
 epochs = 150
 cut_len = 32000

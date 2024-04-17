@@ -37,33 +37,6 @@ def set_seed(seed: int = 42) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
     print(f"Random seed set as {seed}")
 
-# def set_seed(seed):
-#     """Sets random seeds for reproducibility in distributed training.
-
-#     Args:
-#         seed: The integer value for the random seed.
-#     """
-
-#     # Set seed for main process
-#     torch.manual_seed(seed)
-
-#     # If using distributed training, synchronize seed across processes
-#     if torch.distributed.is_available() and torch.distributed.is_initialized():
-#         print("---------- Set random seed for torch distributed training - seed: ", seed)
-#         torch.distributed.broadcast(torch.tensor(seed), 0)
-#         # Worker processes can access the broadcasted seed from here
-#         worker_seed = torch.distributed.get_rank() * int(1e4) + seed
-#         torch.manual_seed(worker_seed)
-#         np.random.seed(worker_seed)
-#         random.seed(worker_seed)
-#         torch.cuda.manual_seed(worker_seed)
-#         # When running on the CuDNN backend, two further options must be set
-#         torch.backends.cudnn.deterministic = True
-#         torch.backends.cudnn.benchmark = False
-#         # Set a fixed value for the hash seed
-#         os.environ["PYTHONHASHSEED"] = str(worker_seed)
-#         print(f"Random seed set as {worker_seed}")
-
 
 def cleanup():
     dist.destroy_process_group()
@@ -106,6 +79,7 @@ def entry(rank, world_size, config, args):
     num_prints = config["main"]["num_prints"]
     gradient_accumulation_steps = config["main"]["gradient_accumulation_steps"]
     data_test_dir = config['dataset_test']['path']
+    kd_weight = config['main']['kd_weight']
 
     init_lr = config['optimizer']['init_lr']
     gamma = config["scheduler"]["gamma"]
@@ -243,6 +217,7 @@ def entry(rank, world_size, config, args):
         tsb_writer = writer,
         num_prints = num_prints,
         logger = logger,
+        kd_weight = kd_weight,
         kd_args = args
     )
 

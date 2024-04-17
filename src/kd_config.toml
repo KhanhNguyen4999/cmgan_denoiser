@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_32_kd_AFD_full_layer_0.3"
+name = "CMGAN_unet_32_kd_AFD_full_layer_1.0"
 seed = 42
 epochs = 150
 cut_len = 32000
@@ -17,6 +17,7 @@ resume = true
 max_clip_grad_norm = 2.0 # torch.nn.utils.max_clip_grad_norm
 gradient_accumulation_steps = 1
 num_prints = 5
+kd_weight = 1.0
 
 # augmentation method
 [main.augment]
