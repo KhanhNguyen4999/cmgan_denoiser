@@ -10,7 +10,7 @@ from evaluation import evaluation_model
 from tools.compute_metrics import stoi
 from augment import Remix
 from data.dataloader import load_audio
-from tools.AFD import AFD
+from tools.contrastive_loss import ContrastiveLoss
 
 
 class KDTrainer(BaseTrainer):
@@ -93,10 +93,10 @@ class KDTrainer(BaseTrainer):
             os.makedirs(self.save_enhanced_dir)
 
         if self.resume:
-            # self.load_best()
             self.reset()
             
-        self.AFD = AFD(kd_args).cuda()
+        # self.AFD = AFD(kd_args).cuda()
+        self.contrastive_loss = ContrastiveLoss("wavlm").cuda()
 
     def gather(self, value: torch.tensor) -> Any:
         # gather value across devices - https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_gather
@@ -174,7 +174,7 @@ class KDTrainer(BaseTrainer):
                 self.logger.info(f"Load pretrained info: ")
                 self.logger.info(f"Best loss: {self.best_loss}")
 
-    def forward_generator_step(self, clean, noisy, mode = "student"):
+    def forward_generator_step(self, clean, noisy):
 
         if len(self.augment) > 0:
             sources = torch.stack([noisy - clean, clean])
@@ -182,10 +182,13 @@ class KDTrainer(BaseTrainer):
             noise, clean = sources
             noisy = noise + clean
 
-        noisy_spec = torch.stft(noisy, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
-                                onesided=True)
-        clean_spec = torch.stft(clean, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
-                                onesided=True)
+        noisy_spec = torch.view_as_real(torch.stft(noisy, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
+                                onesided=True,
+                                return_complex=True))
+        clean_spec = torch.view_as_real(torch.stft(clean, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
+                                onesided=True,
+                                return_complex=True))
+        
         noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
         clean_spec = power_compress(clean_spec)
         clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
@@ -194,12 +197,6 @@ class KDTrainer(BaseTrainer):
         # Runs the forward pass under autocast.
         with autocast(enabled = self.use_amp):
             est_real, est_imag, _ = self.model(noisy_spec)
-    
-        if self.use_amp:
-            # output is float16 because linear layers autocast to float16.
-            # assert est_real.dtype is torch.float16, f"est_real's dtype is not torch.float16 but {est_real.dtype}"
-            # assert est_imag.dtype is torch.float16, f"est_imag's dtype is not torch.float16 but {est_imag.dtype}"
-            None
 
         est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
         est_mag = torch.sqrt(est_real**2 + est_imag**2)
@@ -208,7 +205,6 @@ class KDTrainer(BaseTrainer):
         est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
         est_audio = torch.istft(est_spec_uncompress, self.n_fft, self.hop,
                                     window=torch.hamming_window(self.n_fft).cuda(), onesided=True)
-
 
         return {
             "est_real": est_real,
@@ -221,25 +217,16 @@ class KDTrainer(BaseTrainer):
         }
     
     def forward_generator_teacher_step(self, clean, enhance_audio):
-        enhance_spec = torch.stft(enhance_audio, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(), onesided=True)
+        enhance_spec = torch.view_as_real(torch.stft(enhance_audio, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(), onesided=True))
         enhance_spec = power_compress(enhance_spec)
         enhance_real = enhance_spec[:, 0, :, :].unsqueeze(1)
         enhance_imag = enhance_spec[:, 1, :, :].unsqueeze(1)
         enhance_mag = torch.sqrt(enhance_real**2 + enhance_imag**2)
 
-        clean_spec = torch.stft(clean, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(), onesided=True)
-        clean_spec = power_compress(clean_spec)
-        clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
-        clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
-        clean_mag = torch.sqrt(clean_real**2 + clean_imag**2)
-
         return {
             "est_real": enhance_real,
             "est_imag": enhance_imag,
             "est_mag": enhance_mag,
-            "clean_real": clean_real,
-            "clean_imag": clean_imag,
-            "clean_mag": clean_mag,
             "est_audio": enhance_audio,
         }
 
@@ -264,22 +251,8 @@ class KDTrainer(BaseTrainer):
         
         return loss
     
-    def knowledge_distillation_loss(self, student_outputs, teacher_outputs, T=1.0, alpha=0.5):
-        """
-        Calculate the knowledge distillation loss using KL divergence.
-        :param student_outputs: Outputs of the student model
-        :param teacher_outputs: Outputs of the teacher model
-        :param T: Temperature parameter (default: 1.0)
-        :param alpha: Weight of the KL divergence term (default: 0.5)
-        """
-        
-        kd_loss = nn.KLDivLoss()(nn.functional.log_softmax(student_outputs / T, dim=1),
-                                nn.functional.softmax(teacher_outputs / T, dim=1)) * (alpha * T * T)
-        return kd_loss
         
     def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
-        loss = self.knowledge_distillation_loss(student_generator_outputs["est_mag"],
-                                                teacher_generator_outputs['est_mag']) 
         loss_mag = F.mse_loss(
             student_generator_outputs["est_mag"], teacher_generator_outputs["est_mag"]
         )
@@ -300,6 +273,12 @@ class KDTrainer(BaseTrainer):
         # with autocast(enabled = self.use_amp):
         #     loss_feature = self.AFD(student_generator_outputs['features'], teacher_generator_outputs['features'])
 
+        with autocast(enabled=self.use_amp):
+            contrasive_loss = self.contrastive_loss(student_generator_outputs["noisy"], 
+                                                    student_generator_outputs["clean"],
+                                                    student_generator_outputs["est_audio"])
+
+        print(contrasive_loss)
         return loss
 
 
@@ -318,6 +297,7 @@ class KDTrainer(BaseTrainer):
         teacher_generator_outputs = self.forward_generator_teacher_step(clean, teacher_enhance)
 
         student_generator_outputs["clean"] = clean
+        student_generator_outputs["noisy"] = noisy
 
         loss = self.calculate_generator_loss(student_generator_outputs)
         kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)

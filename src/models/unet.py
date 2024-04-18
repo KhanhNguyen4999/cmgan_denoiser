@@ -3,22 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class BLSTM(nn.Module):
-    def __init__(self, dim, layers=2, bi=True):
-        super().__init__()
-        klass = nn.LSTM
-        self.lstm = klass(bidirectional=bi, num_layers=layers, hidden_size=dim, input_size=dim)
-        self.linear = None
-        if bi:
-            self.linear = nn.Linear(2 * dim, dim)
-
-    def forward(self, x, hidden=None):
-        x, hidden = self.lstm(x, hidden)
-        if self.linear:
-            x = self.linear(x)
-        return x, hidden
-
-
 class DilatedDenseNet(nn.Module):
     def __init__(self, depth=4, in_channels=64):
         super(DilatedDenseNet, self).__init__()
@@ -152,27 +136,6 @@ class ComplexDecoder(nn.Module):
         x = self.conv(x)
         return x
 
-
-class DenseEncoder(nn.Module):
-    def __init__(self, in_channel, channels=64):
-        super(DenseEncoder, self).__init__()
-        self.conv_1 = nn.Sequential(
-            nn.Conv2d(in_channel, channels, (1, 1), (1, 1)),
-            nn.InstanceNorm2d(channels, affine=True),
-            nn.PReLU(channels)
-        )
-        self.dilated_dense = DilatedDenseNet(depth=4, in_channels=channels)
-        # self.conv_2 = nn.Sequential(
-        #     nn.Conv2d(channels, channels, (1, 1), (1, 1), padding=(0, 1)),
-        #     nn.InstanceNorm2d(channels, affine=True),
-        #     nn.PReLU(channels)
-        # )
-
-    def forward(self, x):
-        x = self.conv_1(x)
-        x = self.dilated_dense(x)
-        # x = self.conv_2(x)
-        return x
     
 """ Full assembly of the parts to form the complete network """
 class UNet(nn.Module):
@@ -192,35 +155,8 @@ class UNet(nn.Module):
         self.up3 = (Up(128, 64 // factor, bilinear))
         self.up4 = (Up(64, 32, bilinear))
 
-        # self.inc = (DoubleConv(n_channels, 48))
-        # self.down1 = (Down(48, 96))
-        # self.down2 = (Down(96, 192))
-        # self.down3 = (Down(192, 384))
-        # factor = 2 if bilinear else 1
-        # self.down4 = (Down(384, 768 // factor))
-        # self.up1 = (Up(768, 384 // factor, bilinear))
-        # self.up2 = (Up(384, 192 // factor, bilinear))
-        # self.up3 = (Up(192, 96 // factor, bilinear))
-        # self.up4 = (Up(96, 48, bilinear))
-
-        # self.inc = (DoubleConv(n_channels, 64))
-        # self.down1 = (Down(64, 128))
-        # self.down2 = (Down(128, 256))
-        # self.down3 = (Down(256, 512))
-        # factor = 2 if bilinear else 1
-        # self.down4 = (Down(512, 1024 // factor))
-        # self.up1 = (Up(1024, 512 // factor, bilinear))
-        # self.up2 = (Up(512, 256 // factor, bilinear))
-        # self.up3 = (Up(256, 128 // factor, bilinear))
-        # self.up4 = (Up(128, 64, bilinear))
-
-        # self.outc = (OutConv(32, n_channels))
-
         self.mask_decoder = MaskDecoder(201, num_channel=32, out_channel=1)
         self.complex_decoder = ComplexDecoder(num_channel=32)
-        # (B, 256, 40, 25) -> (B, C, T, F) -> (T, B*F, C)
-        self.t_lstm = BLSTM(256, bi=not True)
-        self.f_lstm = BLSTM(256, bi=not True)
 
     def forward(self, mix):
         '''
@@ -236,18 +172,10 @@ class UNet(nn.Module):
         x4 = self.down3(x3)
         x5 = self.down4(x4)
 
-        b, c, t, f = x5.size()
-        x5 = x5.permute(2, 0, 3, 1).contiguous().view(t, b*f, c)
-        x5, _ = self.t_lstm(x5)
-        x5 = x5.view(t, b, f, c).permute(2, 1, 0, 3).contiguous().view(f, b*t, c)
-        x5, _ = self.f_lstm(x5)
-        x5 = x5.view(f, b, t, c).permute(1, 3, 2, 0)
-
         x = self.up1(x5, x4)
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
-        # x = self.outc(x)
 
         # Decoder
         mask = self.mask_decoder(x)
@@ -259,4 +187,4 @@ class UNet(nn.Module):
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag, [x4]
+        return final_real, final_imag, [x5]

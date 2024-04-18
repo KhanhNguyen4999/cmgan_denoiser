@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_32_kd_AFD_full_layer_1.0"
+name = "CMGAN_unet_32_kd_contrastive"
 seed = 42
 epochs = 150
 cut_len = 32000
@@ -44,7 +44,7 @@ ndf = 16
 
 
 [dataset_train]
-path = "/home/duynk29/khanhnnm/VCTK/train"
+path = "/home/duynk29/khanhnnm/VCTK/test"
 [dataset_train.dataloader]
 batchsize = 16
 n_worker = 4
