@@ -10,10 +10,10 @@ from evaluation import evaluation_model
 from tools.compute_metrics import stoi
 from augment import Remix
 from data.dataloader import load_audio
-from tools.contrastive_loss_base_huggingface import ContrastiveLoss
+from tools import AFD
 
 
-class UTrainer(BaseTrainer):
+class KDTrainer(BaseTrainer):
     def __init__ (
                 self,
                 dist,
@@ -23,6 +23,7 @@ class UTrainer(BaseTrainer):
                 epochs,
                 batch_size,
                 model,
+                teacher_model,
                 train_ds,
                 test_ds,
                 scheduler,
@@ -41,9 +42,11 @@ class UTrainer(BaseTrainer):
                 tsb_writer,
                 num_prints,
                 logger,
+                kd_weight,
+                criterion_kd_list,
             ):
 
-        super(UTrainer, self).__init__(
+        super(KDTrainer, self).__init__(
                                 dist,
                                 rank,
                                 resume,
@@ -57,6 +60,9 @@ class UTrainer(BaseTrainer):
                                 save_model_dir
                             )
         
+        self.teacher_model = teacher_model
+        self.kd_weight = kd_weight
+        self.criterion_kd_list = criterion_kd_list
         self.optimizer = optimizer
         self.batch_size = batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
@@ -91,7 +97,6 @@ class UTrainer(BaseTrainer):
 
         if self.resume:
             self.reset()
-
 
     def gather(self, value: torch.tensor) -> Any:
         # gather value across devices - https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_gather
@@ -169,7 +174,7 @@ class UTrainer(BaseTrainer):
                 self.logger.info(f"Load pretrained info: ")
                 self.logger.info(f"Best loss: {self.best_loss}")
 
-    def forward_generator_step(self, clean, noisy):
+    def forward_generator_step(self, model, clean, noisy, type):
 
         if len(self.augment) > 0:
             sources = torch.stack([noisy - clean, clean])
@@ -188,9 +193,11 @@ class UTrainer(BaseTrainer):
         clean_spec = power_compress(clean_spec)
         clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
         clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
-
-    
-        est_real, est_imag, _ = self.model(noisy_spec)
+        if type == "teacher":
+            with torch.no_grad():
+                est_real, est_imag, features = model(noisy_spec)
+        else:
+            est_real, est_imag, features = model(noisy_spec)
 
         est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
         est_mag = torch.sqrt(est_real**2 + est_imag**2)
@@ -208,11 +215,10 @@ class UTrainer(BaseTrainer):
             "clean_imag": clean_imag,
             "clean_mag": clean_mag,
             "est_audio": est_audio,
+            "features": features
         }
-    
 
     def calculate_generator_loss(self, generator_outputs):
-
         loss_mag = F.mse_loss(
             generator_outputs["est_mag"], generator_outputs["clean_mag"]
         )
@@ -230,29 +236,44 @@ class UTrainer(BaseTrainer):
             + self.loss_weights[2] * time_loss
         )
         return loss
+    
+    
+    def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
+        loss = torch.zeros(1, requires_grad=True).cuda()
+        for criterion, weight in zip(self.criterion_kd_list, self.kd_weight):
+            if isinstance(criterion, AFD):
+                loss_afd, attn = criterion(student_generator_outputs['features'], teacher_generator_outputs['features'])
+                loss += loss_afd * weight
+            else:
+                loss += criterion(student_generator_outputs, teacher_generator_outputs) * weight
+        
+        return loss
 
     def train_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
+        teacher_enhance = batch[2].cuda()
 
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
-        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
+        noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
+        noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
 
         # Runs the forward pass under autocast.
         with autocast(enabled = self.use_amp):
-            student_generator_outputs = self.forward_generator_step(clean, noisy)
+            student_generator_outputs = self.forward_generator_step(self.model, clean, noisy, "student")
+            teacher_generator_outputs = self.forward_generator_step(self.teacher_model, clean, noisy, "teacher")
 
             student_generator_outputs["clean"] = clean
             student_generator_outputs["noisy"] = noisy
 
             loss = self.calculate_generator_loss(student_generator_outputs)
+            kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
 
-        total_loss = loss
+        total_loss = loss + kd_loss
         self.scaler.scale(total_loss).backward(retain_graph=True)
 
         # Logging
@@ -260,21 +281,27 @@ class UTrainer(BaseTrainer):
         if self.n_gpus > 1:
             loss = self.gather(loss).mean()
 
-        return loss.item()
+        return loss.item(), kd_loss.item()
 
 
     def train_epoch(self, epoch) -> None:
         self.model.train()
+        self.teacher_model.eval()
 
         loss_train = []
+        se_loss_train = []
+        kd_loss_train = []
 
         self.logger.info('\n <Epoch>: {} -- Start training '.format(epoch))
         name = f"Train | Epoch {epoch}"
         logprog = LogProgress(self.logger, self.train_ds, updates=self.num_prints, name=name)
 
         for idx, batch in enumerate(logprog):
-            loss = self.train_step(batch)
+            se_loss, kd_loss = self.train_step(batch)
+            loss = se_loss + kd_loss
             loss_train.append(loss)
+            kd_loss_train.append(kd_loss)
+            se_loss_train.append(se_loss)
         
             if self.rank  == 0:
                 logprog.update(gen_loss=format(loss, ".5f"))
@@ -288,20 +315,24 @@ class UTrainer(BaseTrainer):
 
                 # update parameters
                 self.scaler.step(self.optimizer)
-                self.optimizer.zero_grad()
                 self.scaler.update()
+                self.optimizer.zero_grad()
                 
 
         loss_train = np.mean(loss_train)
+        kd_loss_train = np.mean(kd_loss_train)
+        se_loss_train = np.mean(se_loss_train)
 
-        template = 'Train loss: {}'
-        info = template.format(loss_train)
+        template = 'Train loss: {} - kd loss: {} - se loss: {}'
+        info = template.format(loss_train, kd_loss_train, se_loss_train)
         if self.rank == 0:
             # print("Done epoch {} - {}".format(epoch, info))
             self.logger.info('-' * 70)
             self.logger.info(bold(f"     Epoch {epoch} - Overall Summary Training | {info}"))
-            self.tsb_writer.add_scalar("Loss/train", loss_train, epoch)   
-
+            self.tsb_writer.add_scalar("Loss/train", loss_train, epoch)
+            self.tsb_writer.add_scalar("Loss/train_kd_loss", kd_loss_train, epoch)
+            self.tsb_writer.add_scalar("Loss/train_se_loss", se_loss_train, epoch)    
+            
         # ------------ Valid stage -------------------
         loss_valid = self.valid_epoch(epoch)
 
@@ -341,15 +372,16 @@ class UTrainer(BaseTrainer):
     def test_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
+        teacher_enhance = batch[2].cuda()
 
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
-        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
+        noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
+        noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
 
         # Runs the forward pass under autocast.
         with autocast(enabled = self.use_amp):
-            student_generator_outputs = self.forward_generator_step(clean, noisy)
+            student_generator_outputs = self.forward_generator_step(self.model, clean, noisy, "student")
 
             student_generator_outputs["clean"] = clean
             student_generator_outputs["noisy"] = noisy
@@ -359,18 +391,16 @@ class UTrainer(BaseTrainer):
         # loss is float32 because mse_loss layers autocast to float32.
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
 
-        total_loss = loss
-
         # Logging
         # average over devices in ddp
         if self.n_gpus > 1:
             loss = self.gather(loss).mean()
 
-        return total_loss.item()
+        return loss.item()
 
     def valid_epoch(self, epoch):
-
         self.model.eval()
+        self.teacher_model.eval()
 
         loss_total = 0.
         for idx, batch in enumerate(self.test_ds):

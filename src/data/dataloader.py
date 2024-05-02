@@ -152,11 +152,13 @@ def load_data(is_train, data_dir, batch_size, n_cpu, cut_len, rank, world_size, 
         dataset_ds = Audioset(data_dir, cut_len)
 
     sampler = DistributedSampler(dataset=dataset_ds, num_replicas=world_size, rank=rank, shuffle=shuffle)
+
     train_dataset = torch.utils.data.DataLoader(dataset=dataset_ds, 
                                                 batch_size=batch_size, 
                                                 shuffle= False,
                                                 drop_last=False, 
                                                 num_workers=n_cpu,
-                                                sampler=sampler)
+                                                sampler=sampler
+                                            )
 
     return train_dataset

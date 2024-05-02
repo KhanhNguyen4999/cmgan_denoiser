@@ -1,9 +1,9 @@
 [main]
-name = "CMGAN_unet_bilinear_32"
-seed = 42
+name = "CMGAN_unet_bilinear_32_test"
+seed = 0
 epochs = 150
 cut_len = 32000
-save_model_dir = "/home/duynk29/khanhnnm/checkpoint"
+save_model_dir = "/root/se/checkpoint"
 
 # whether to use Automatic precision to speed up 
 use_amp = false
@@ -43,7 +43,7 @@ ndf = 16
 
 
 [dataset_train]
-path = "/home/duynk29/khanhnnm/VCTK/train"
+path = "/root/se/VCTK/test"
 [dataset_train.dataloader]
 batchsize = 16
 n_worker = 4
@@ -54,18 +54,18 @@ shuffle = true
 drop_last = true
     
 [dataset_valid]
-path = "/home/duynk29/khanhnnm/VCTK/test"
+path = "/root/se/VCTK/test"
     
 [dataset_valid.dataloader]
 batchsize = 16
 n_worker = 4
 
 [dataset_valid.sampler]
-shuffle = false
+shuffle = true
 drop_last = false 
 
 [dataset_test]
-path = "/home/duynk29/khanhnnm/VCTK/test"
+path = "/root/se/VCTK/test"
 
 
 [optimizer]
@@ -76,4 +76,4 @@ decay_epoch = 20
 gamma = 0.5
 
 [trainer]
-path = "trainer.unet_trainer.UTrainer"
+path = "trainer.unet_trainer_2.UTrainer"

@@ -10,7 +10,7 @@ import json
 from evaluation import evaluation_model
 from tools.compute_metrics import stoi
 from tools.AKD import AKD
-from tools.AFD import AFD
+from cmgan_denoiser.src.tools.AFD_refine import AFD
 from tools.FAKD import FAKD
 from augment import Remix
 

@@ -1,42 +1,28 @@
-from models.generator import TSCNet
-from models.unet import UNet
-from models.demucs import Demucs
-from models import discriminator
 import os
-from time import gmtime, strftime
-from data import dataloader2
 import torch
-import torch.distributed as dist
-import torch.optim as optim
-from torch.nn.parallel import DistributedDataParallel
-from torch.distributed.optim import ZeroRedundancyOptimizer
-from utils import *
 import toml
-from torchinfo import summary
-import argparse
-import torch.multiprocessing as mp
-from torch.utils.tensorboard import SummaryWriter
 import warnings
 import logging
+import argparse
+from utils import *
+
+from models.unet import UNet
+from models.generator import TSCNet
+from time import gmtime, strftime
+from data import dataloader2
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
+from torch.distributed.optim import ZeroRedundancyOptimizer
+from torchinfo import summary
+import torch.multiprocessing as mp
+from torch.utils.tensorboard import SummaryWriter
+from tools import KDLoss, PearsonCorrelation, AFD
 
 warnings.filterwarnings('ignore')
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 # global
 logger = logging.getLogger(__name__)
-
-def set_seed(seed: int = 42) -> None:
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    # When running on the CuDNN backend, two further options must be set
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    # Set a fixed value for the hash seed
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    print(f"Random seed set as {seed}")
-
 
 def cleanup():
     dist.destroy_process_group()
@@ -65,11 +51,10 @@ def entry(rank, world_size, config, args):
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     setup(rank, world_size)
     if rank == 0:
-        # fix random seed for reproducing
+        # This should be needed to be reproducible https://discuss.pytorch.org/t/setting-seed-in-torch-ddp/126638
         set_seed(config["main"]["seed"])
 
     ## load config
-    # train
     epochs = config["main"]["epochs"]
     batch_size = config['dataset_train']['dataloader']['batchsize']
     use_amp = config["main"]["use_amp"]
@@ -79,7 +64,6 @@ def entry(rank, world_size, config, args):
     num_prints = config["main"]["num_prints"]
     gradient_accumulation_steps = config["main"]["gradient_accumulation_steps"]
     data_test_dir = config['dataset_test']['path']
-    kd_weight = config['main']['kd_weight']
 
     init_lr = config['optimizer']['init_lr']
     gamma = config["scheduler"]["gamma"]
@@ -87,7 +71,6 @@ def entry(rank, world_size, config, args):
     num_channel = config['model']['num_channel']
     # augment
     remix = config["main"]["augment"]["remix"]
-    teacher_checkpoint = "/home/duynk29/khanhnnm/cmgan_denoiser/src/best_ckpt/ckpt"
 
     # feature
     n_fft = config["feature"]["n_fft"]
@@ -108,11 +91,7 @@ def entry(rank, world_size, config, args):
 
     log_dir = save_model_dir
     logger = get_logger(log_dir=log_dir, log_name="train.log", resume=resume, is_rank0=rank==0)
-
     logger.info(f"Argument: {args}")
-
-    # This should be needed to be reproducible https://discuss.pytorch.org/t/setting-seed-in-torch-ddp/126638
-    config["main"]["seed"] += rank 
 
     # Create train dataloader
     train_ds = dataloader2.load_data(    
@@ -145,7 +124,7 @@ def entry(rank, world_size, config, args):
 
     # ----- Load student model and teacher model
     model = UNet(n_channels=num_channel, bilinear=True)
-    state_dict = load_state_dict_from_checkpoint(teacher_checkpoint)
+    state_dict = load_state_dict_from_checkpoint(config['main']['teacher_checkpoint'])
     teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
     teacher_model.load_state_dict(state_dict)
     
@@ -153,12 +132,9 @@ def entry(rank, world_size, config, args):
     model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
     teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
-
     if rank == 0:
         logger.info(f"---------- Summary for student model")
         summary(model, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
-        logger.info(f"----------Summary for Teacher model")
-        summary(teacher_model, [(2, 2, cut_len//hop+1, int(n_fft/2)+1)])
     
     # optimizer
     if config['main']['use_ZeRo']:
@@ -180,6 +156,28 @@ def entry(rank, world_size, config, args):
     loss_weights.append(config["main"]['loss_weights']["time"])
     loss_weights.append(config["main"]['loss_weights']["gan"])
 
+    # criterion
+    kd_weight = list(config['main']['criterion']['kd_weight'])
+
+    criterion_kd_list = []
+    if config['main']['criterion']['KDLoss']:
+        criterion_kd_list.append(KDLoss(weight_ri=config["main"]['loss_weights']["ri"],
+                                        weight_mag=config["main"]['loss_weights']["mag"],
+                                        weight_time=config["main"]['loss_weights']["time"],
+                                        weight_gan=config["main"]['loss_weights']["gan"]).cuda())
+        
+    elif config['main']['criterion']['PeasonCorrelation']:
+        criterion_kd_list.append(PearsonCorrelation().cuda())
+    elif config['main']['criterion']['AFDLoss']:
+        # student: layer [x1,x2,x3,x4], teacher: layer [x2, x3, x4, x5]
+        s_shapes = [(batch_size, 32, 321, 210), (batch_size, 64, 160, 100), (batch_size, 128, 80, 50), (batch_size, 256, 40, 25)]
+        t_shapes = [(batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101)]
+        qk_dim = 512
+        criterion_kd_list.append(AFD(t_shapes=t_shapes, 
+                                    s_shapes=s_shapes, 
+                                    qk_dim=qk_dim).cuda())
+
+
     trainer_class = initialize_module(config["trainer"]["path"], initialize=False)
 
     # scheduler
@@ -198,27 +196,22 @@ def entry(rank, world_size, config, args):
         test_ds = test_ds,
         scheduler = scheduler,
         optimizer = optimizer,
-        
         loss_weights = loss_weights,
-
         hop = hop,
         n_fft = n_fft,
-        
         scaler = scaler,
         use_amp = use_amp,
         interval_eval = interval_eval,
         max_clip_grad_norm = max_clip_grad_norm,
         gradient_accumulation_steps = gradient_accumulation_steps,
-
         remix = remix,
-        
         save_model_dir = save_model_dir,
         data_test_dir = data_test_dir,
         tsb_writer = writer,
         num_prints = num_prints,
         logger = logger,
         kd_weight = kd_weight,
-        kd_args = args
+        criterion_kd_list = criterion_kd_list,
     )
 
     trainer.train()
@@ -238,14 +231,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     config = toml.load(args.config)
-
-    # kd argument
-    
-  
-    # args.s_shapes = [(16, 64, 160, 100), (16, 128, 80, 50), (16, 256, 40, 25)]
-    args.s_shapes = [(16, 64, 160, 100), (16, 128, 80, 50), (16, 256, 40, 25), (16, 256, 40, 25)]
-    args.t_shapes = [(16, 64, 321, 101), (16, 64, 321, 101), (16, 64, 321, 101), (16, 64, 321, 101)]
-    args.qk_dim = 512
 
     available_gpus = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
     print("GPU list:", available_gpus)

@@ -167,9 +167,6 @@ def load_data(ds_dir, batch_size, n_cpu, cut_len, world_size):
 
     return train_dataset, test_dataset
 
-def seed_worker(worker_id):
-    numpy.random.seed(42 + worker_id)
-    random.seed(42 + worker_id)
 
 def load_data(is_train, data_dir, batch_size, n_cpu, cut_len, rank, world_size, shuffle):
     torchaudio.set_audio_backend("sox_io")         # in linux
