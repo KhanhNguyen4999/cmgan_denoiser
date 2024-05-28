@@ -29,12 +29,12 @@ class KDTrainer(BaseTrainer):
                 train_ds,
                 test_ds,
                 scheduler,
+                scheduler_D,
                 optimizer,
                 kd_optimizer,
                 loss_weights,
                 hop,
                 n_fft,
-                use_amp,
                 interval_eval,
                 max_clip_grad_norm,
                 gradient_accumulation_steps,
@@ -58,7 +58,6 @@ class KDTrainer(BaseTrainer):
                                 train_ds,
                                 test_ds,
                                 epochs,
-                                use_amp,
                                 interval_eval,
                                 max_clip_grad_norm,
                                 save_model_dir
@@ -73,6 +72,7 @@ class KDTrainer(BaseTrainer):
         self.gradient_accumulation_steps = gradient_accumulation_steps
         
         self.scheduler = scheduler
+        self.scheduler_D = scheduler_D
 
         self.loss_weights = loss_weights
         self.tsb_writer = tsb_writer
@@ -354,9 +354,9 @@ class KDTrainer(BaseTrainer):
         
         loss = se_loss + kd_loss 
 
-        self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+        self.optimizer.zero_grad()
 
         if self.kd_optimizer is not None:
             self.kd_optimizer.zero_grad()
@@ -367,9 +367,9 @@ class KDTrainer(BaseTrainer):
         discriminator_loss = self.calculate_discriminator_loss(student_generator_outputs)
         
         if discriminator_loss is not None:
-            self.discriminator_model_optimizer.zero_grad()
             discriminator_loss.backward()
             self.discriminator_model_optimizer.step()
+            self.discriminator_model_optimizer.zero_grad()
         else:
             discriminator_loss = torch.tensor([0.0])
 
@@ -462,6 +462,8 @@ class KDTrainer(BaseTrainer):
 
         self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
         self.scheduler.step()
+        self.scheduler_D.step()
+
 
     @torch.no_grad()
     def test_step(self, batch):

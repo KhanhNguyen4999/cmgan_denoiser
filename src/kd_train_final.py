@@ -55,7 +55,6 @@ def entry(rank, world_size, config, args):
     #============================ load config
     epochs = config["main"]["epochs"]
     batch_size = config['dataset_train']['dataloader']['batchsize']
-    use_amp = config["main"]["use_amp"]
     max_clip_grad_norm = config["main"]["max_clip_grad_norm"]
     interval_eval = config["main"]["interval_eval"]
     resume = config['main']['resume']
@@ -98,9 +97,6 @@ def entry(rank, world_size, config, args):
 
     logger.info(f"Total iteration through trainset: {len(train_ds)}")
     logger.info(f"Total iteration through testset: {len(test_ds)}")
-
-    # model
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     # ----- Load student model and teacher model
     model = UNet(n_channels=num_channel, bilinear=True)
@@ -186,8 +182,6 @@ def entry(rank, world_size, config, args):
         loss_weights = loss_weights,
         hop = hop,
         n_fft = n_fft,
-        # scaler = scaler,
-        use_amp = use_amp,
         interval_eval = interval_eval,
         max_clip_grad_norm = max_clip_grad_norm,
         gradient_accumulation_steps = gradient_accumulation_steps,

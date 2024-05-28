@@ -55,7 +55,6 @@ def entry(rank, world_size, config, args):
     #============================ load config
     epochs = config["main"]["epochs"]
     batch_size = config['dataset_train']['dataloader']['batchsize']
-    use_amp = config["main"]["use_amp"]
     max_clip_grad_norm = config["main"]["max_clip_grad_norm"]
     interval_eval = config["main"]["interval_eval"]
     resume = config['main']['resume']
@@ -161,7 +160,8 @@ def entry(rank, world_size, config, args):
 
     # scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
-    
+    scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=decay_epoch, gamma=gamma)
+
     trainer = trainer_class(
         dist = dist,
         rank = rank,
@@ -174,12 +174,12 @@ def entry(rank, world_size, config, args):
         train_ds = train_ds,
         test_ds = test_ds,
         scheduler = scheduler,
+        scheduler_D = scheduler_D,
         optimizer = optimizer,
         kd_optimizer = kd_optimizer,
         loss_weights = loss_weights,
         hop = hop,
         n_fft = n_fft,
-        use_amp = use_amp,
         interval_eval = interval_eval,
         max_clip_grad_norm = max_clip_grad_norm,
         gradient_accumulation_steps = gradient_accumulation_steps,

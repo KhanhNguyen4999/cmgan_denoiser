@@ -16,7 +16,6 @@ class BaseTrainer:
             train_ds,
             test_ds,
             epochs,
-            use_amp,
             interval_eval,
             max_clip_grad_norm,
             save_model_dir
@@ -28,7 +27,6 @@ class BaseTrainer:
         self.train_ds = train_ds
         self.test_ds = test_ds
         self.epochs = epochs
-        self.use_amp = use_amp
         self.interval_eval = interval_eval
         self.max_clip_grad_norm = max_clip_grad_norm
         self.save_model_dir = save_model_dir

@@ -1,7 +1,6 @@
 from base.base_trainer import BaseTrainer
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
-from models import discriminator
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from utils import *
 from typing import Any
@@ -34,6 +33,7 @@ class KDTrainer(BaseTrainer):
                 loss_weights,
                 hop,
                 n_fft,
+                scaler,
                 use_amp,
                 interval_eval,
                 max_clip_grad_norm,
@@ -78,6 +78,7 @@ class KDTrainer(BaseTrainer):
 
         self.n_fft = n_fft
         self.hop = hop
+        self.scaler = scaler
 
         self.best_loss = float('inf')
         self.best_state = None
@@ -127,6 +128,7 @@ class KDTrainer(BaseTrainer):
         package['best_state'] = self.best_state
         package['loss'] = self.best_loss
         package['epoch'] = epoch
+        package['scaler'] = self.scaler
         tmp_path = os.path.join(self.save_model_dir, "checkpoint.tar")
         torch.save(package, tmp_path)
 
@@ -161,14 +163,12 @@ class KDTrainer(BaseTrainer):
                 self.model.module.load_state_dict(package['model'])
             else:
                 self.model.load_state_dict(package['model'])
-
                 
             self.optimizer.load_state_dict(package['optimizer'])
-
             self.epoch_start = package['epoch'] + 1
             self.best_loss = package['loss']
             self.best_state = package['best_state']
-    
+            self.scaler = package['scaler']
             if self.rank == 0:
                 self.logger.info(f"Model checkpoint loaded. Training will begin at {self.epoch_start} epoch.")
                 self.logger.info(f"Load pretrained info: ")
@@ -273,8 +273,6 @@ class KDTrainer(BaseTrainer):
     def train_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
-        one_labels = torch.ones(clean.size(0)).cuda()
-
         if any([isinstance(x, AFD) for x in self.criterion_kd_list]):
             # Normalization
             c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
@@ -282,13 +280,13 @@ class KDTrainer(BaseTrainer):
             noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
 
             # Runs the forward pass under autocast.
-            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
-            teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
-            student_generator_outputs["clean"] = clean
-            student_generator_outputs["noisy"] = noisy
-            student_generator_outputs["one_labels"] = one_labels
-            se_loss = self.calculate_se_loss(student_generator_outputs)
-            kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
+            with autocast(enabled = self.use_amp):
+                student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+                teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
+                student_generator_outputs["clean"] = clean
+                student_generator_outputs["noisy"] = noisy
+                se_loss = self.calculate_se_loss(student_generator_outputs)
+                kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
         else:
             teacher_enhance = batch[2].cuda()
             # Normalization
@@ -297,27 +295,19 @@ class KDTrainer(BaseTrainer):
             noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
 
             # Runs the forward pass under autocast.
-            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
-            teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
-            student_generator_outputs["clean"] = clean
-            student_generator_outputs["noisy"] = noisy
-            student_generator_outputs["one_labels"] = one_labels
-            se_loss = self.calculate_se_loss(student_generator_outputs)
-            kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
+            with autocast(enabled = self.use_amp):
+                student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+                teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+                student_generator_outputs["clean"] = clean
+                student_generator_outputs["noisy"] = noisy
+                se_loss = self.calculate_se_loss(student_generator_outputs)
+                kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert se_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {se_loss.dtype}"
 
-        
-        loss = se_loss + kd_loss 
-
-        loss.backward()
-        self.optimizer.step()
-        self.optimizer.zero_grad()
-
-        if self.kd_optimizer is not None:
-            self.kd_optimizer.step()
-            self.kd_optimizer.zero_grad()
+        total_loss = se_loss + kd_loss
+        self.scaler.scale(total_loss).backward(retain_graph=True)
 
         # Logging
         # average over devices in ddp
@@ -325,7 +315,7 @@ class KDTrainer(BaseTrainer):
             se_loss = self.gather(se_loss).mean()
             kd_loss = self.gather(kd_loss).mean()
 
-        return se_loss.item(), kd_loss.item()
+        return total_loss.item(), se_loss.item(), kd_loss.item()
 
 
     def train_epoch(self, epoch) -> None:
@@ -344,16 +334,31 @@ class KDTrainer(BaseTrainer):
 
         for idx, batch in enumerate(logprog):
             self.idx_step = idx
-            se_loss, kd_loss = self.train_step(batch)
-
-            total_loss = se_loss + kd_loss
+            total_loss, se_loss, kd_loss = self.train_step(batch)
+           
             loss_train.append(total_loss)
             kd_loss_train.append(kd_loss)
             se_loss_train.append(se_loss)
         
             if self.rank  == 0:
                 logprog.update(gen_loss=format(total_loss, ".5f"))
+            
+            # Optimize step
+            if (idx + 1) % self.gradient_accumulation_steps == 0 or idx == len(self.train_ds) - 1:
+                #gradient clipping and update parameters
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_clip_grad_norm)
+                self.scaler.step(self.optimizer)
+                self.optimizer.zero_grad()
 
+                if self.kd_optimizer is not None:
+                    self.scaler.unscale_(self.kd_optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.criterion_kd_list.parameters(), max_norm=self.max_clip_grad_norm)
+                    self.scaler.step(self.kd_optimizer)
+                    self.kd_optimizer.zero_grad()
+
+                self.scaler.update()
+                
 
         loss_train = np.mean(loss_train)
         kd_loss_train = np.mean(kd_loss_train)
@@ -367,7 +372,7 @@ class KDTrainer(BaseTrainer):
             self.logger.info(bold(f"     Epoch {epoch} - Overall Summary Training | {info}"))
             self.tsb_writer.add_scalar("Loss/train", loss_train, epoch)
             self.tsb_writer.add_scalar("Loss/train_kd_loss", kd_loss_train, epoch)
-            self.tsb_writer.add_scalar("Loss/train_se_loss", se_loss_train, epoch)     
+            self.tsb_writer.add_scalar("Loss/train_se_loss", se_loss_train, epoch)    
             
         # ------------ Valid stage -------------------
         loss_valid = self.valid_epoch(epoch)
@@ -408,18 +413,18 @@ class KDTrainer(BaseTrainer):
     def test_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
-        one_labels = torch.ones(clean.size(0)).to(self.rank)
 
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
         noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
         noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
 
-        student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
-        student_generator_outputs["clean"] = clean
-        student_generator_outputs["noisy"] = noisy
-        student_generator_outputs["one_labels"] = one_labels
-        loss = self.calculate_se_loss(student_generator_outputs)
+        # Runs the forward pass under autocast.
+        with autocast(enabled = self.use_amp):
+            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+            student_generator_outputs["clean"] = clean
+            student_generator_outputs["noisy"] = noisy
+            loss = self.calculate_se_loss(student_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
