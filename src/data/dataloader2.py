@@ -34,6 +34,13 @@ class DemandDataset(torch.utils.data.Dataset):
         self.clean_wav_name = os.listdir(self.clean_dir)
         self.clean_wav_name = natsorted(self.clean_wav_name)
 
+        wav_2_pesq = {}
+        with open(f"{data_dir}/pesq_label.txt") as reader:
+            for line in reader.readlines():
+                audio_name, pesq = line.split(" ")
+                wav_2_pesq[audio_name] = float(pesq.strip()) 
+        self.wav_2_pesq = wav_2_pesq
+
     def __len__(self):
         return len(self.clean_wav_name)
 
@@ -42,6 +49,7 @@ class DemandDataset(torch.utils.data.Dataset):
         noisy_file = os.path.join(self.noisy_dir, self.clean_wav_name[idx])
         enhance_file = os.path.join(self.teacher_enhance_dir, self.clean_wav_name[idx])
 
+        pesq = self.wav_2_pesq[self.clean_wav_name[idx]]
         clean_ds, _ = torchaudio.load(clean_file)
         noisy_ds, _ = torchaudio.load(noisy_file)
         enhance_ds, _ = torchaudio.load(enhance_file)
@@ -76,7 +84,7 @@ class DemandDataset(torch.utils.data.Dataset):
             clean_ds = clean_ds[wav_start:wav_start + self.cut_len]
             enhance_ds = enhance_ds[wav_start:wav_start + self.cut_len]
 
-        return clean_ds, noisy_ds, enhance_ds, length
+        return clean_ds, noisy_ds, enhance_ds, length, pesq
 
 class Audioset:
     def __init__(self, data_dir, cut_len=16000*2):
@@ -141,48 +149,32 @@ class Audioset:
             assert clean_audio.shape[-1] == noisy_audio.shape[-1], "dimension difference between clean audio and noisy audio"
             return clean_audio.squeeze(), noisy_audio.squeeze(), enhance_audio.squeeze(), len(clean_audio)
 
-def load_data(ds_dir, batch_size, n_cpu, cut_len, world_size):
+def load_data(ds_dir, batch_size, n_cpu, rank, cut_len, world_size, shuffle):
     torchaudio.set_audio_backend("sox_io")         # in linux
+
+    ds_dir = "/".join(ds_dir.split("/")[:-1])
     train_dir = os.path.join(ds_dir, 'train')
     test_dir = os.path.join(ds_dir, 'test')
 
     train_ds = DemandDataset(train_dir, cut_len)
     test_ds = DemandDataset(test_dir, cut_len)
 
-    # sampler = DistributedSampler(dataset=train_ds, num_replicas=world_size, rank=rank, shuffle=True)
+    train_sampler = DistributedSampler(dataset=train_ds, num_replicas=world_size, rank=rank, shuffle=shuffle)
     train_dataset = torch.utils.data.DataLoader(dataset=train_ds, 
-                                                batch_size=batch_size, 
-                                                shuffle=False,
-                                                drop_last=True, 
-                                                num_workers=n_cpu,
-                                                # sampler=sampler,
-                                            )
-
-    test_dataset = torch.utils.data.DataLoader(dataset=test_ds, 
-                                                batch_size=batch_size, 
-                                                shuffle=False,
-                                                drop_last=False, 
-                                                num_workers=n_cpu
-                                            )
-
-    return train_dataset, test_dataset
-
-
-def load_data(is_train, data_dir, batch_size, n_cpu, cut_len, rank, world_size, shuffle):
-    torchaudio.set_audio_backend("sox_io")         # in linux
-    if is_train:
-        dataset_ds = DemandDataset(data_dir, cut_len)
-    else:
-        dataset_ds = Audioset(data_dir, cut_len)
-
-    sampler = DistributedSampler(dataset=dataset_ds, num_replicas=world_size, rank=rank, shuffle=shuffle)
-
-    train_dataset = torch.utils.data.DataLoader(dataset=dataset_ds, 
                                                 batch_size=batch_size, 
                                                 shuffle= False,
                                                 drop_last=False, 
                                                 num_workers=n_cpu,
-                                                sampler=sampler
+                                                sampler=train_sampler
+                                            )
+    
+    test_sampler = DistributedSampler(dataset=test_ds, num_replicas=world_size, rank=rank, shuffle=shuffle)
+    test_dataset = torch.utils.data.DataLoader(dataset=test_ds, 
+                                                batch_size=batch_size, 
+                                                shuffle= False,
+                                                drop_last=False, 
+                                                num_workers=n_cpu,
+                                                sampler=test_sampler
                                             )
 
-    return train_dataset
+    return train_dataset, test_dataset

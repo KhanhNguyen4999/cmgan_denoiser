@@ -1,16 +1,18 @@
 from base.base_trainer import BaseTrainer
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
+from models import discriminator
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from utils import *
 from typing import Any
 import numpy as np
-import os
 from evaluation import evaluation_model
 from tools.compute_metrics import stoi
 from augment import Remix
 from data.dataloader import load_audio
-from tools.contrastive_loss_base_huggingface import ContrastiveLoss
+from tools import AFD
+import os
+import json
 
 
 class KDTrainer(BaseTrainer):
@@ -28,10 +30,10 @@ class KDTrainer(BaseTrainer):
                 test_ds,
                 scheduler,
                 optimizer,
+                kd_optimizer,
                 loss_weights,
                 hop,
                 n_fft,
-                scaler,
                 use_amp,
                 interval_eval,
                 max_clip_grad_norm,
@@ -44,6 +46,8 @@ class KDTrainer(BaseTrainer):
                 logger,
                 kd_weight,
                 criterion_kd_list,
+                discriminator_model,
+                discriminator_optimizer
             ):
 
         super(KDTrainer, self).__init__(
@@ -60,6 +64,7 @@ class KDTrainer(BaseTrainer):
                                 save_model_dir
                             )
         
+        self.kd_optimizer = kd_optimizer
         self.teacher_model = teacher_model
         self.kd_weight = kd_weight
         self.criterion_kd_list = criterion_kd_list
@@ -75,7 +80,6 @@ class KDTrainer(BaseTrainer):
 
         self.n_fft = n_fft
         self.hop = hop
-        self.scaler = scaler
 
         self.best_loss = float('inf')
         self.best_state = None
@@ -85,6 +89,9 @@ class KDTrainer(BaseTrainer):
         self.num_prints = num_prints
         self.logger = logger
         self.model_type = "unet"
+
+        self.discriminator_model = discriminator_model
+        self.discriminator_model_optimizer = discriminator_optimizer
 
         # data augment
         augments = []
@@ -114,24 +121,23 @@ class KDTrainer(BaseTrainer):
         package = {}
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             package["model"] = self.model.module.state_dict()
+            package["disc_model"] = self.discriminator_model.module.state_dict()
         else:
             package["model"] = self.model.state_dict()
         
         if isinstance(self.optimizer, ZeroRedundancyOptimizer):
             package['optimizer'] = self.optimizer.consolidate_state_dict()
+            package["disc_optimizer"] = self.discriminator_model_optimizer.consolidate_state_dict()
         else:
             package['optimizer'] = self.optimizer.state_dict()
+            package["disc_optimizer"] = self.discriminator_model_optimizer.state_dict()
         
         package['best_state'] = self.best_state
         package['loss'] = self.best_loss
         package['epoch'] = epoch
-        package['scaler'] = self.scaler
         tmp_path = os.path.join(self.save_model_dir, "checkpoint.tar")
         torch.save(package, tmp_path)
 
-        # Save only the best model, pay attention that don't need to save best discriminator
-        # because when infer time, you only need model to predict, and if better the discriminator
-        # the worse the model ((:
         model = package['best_state']
         tmp_path = os.path.join(self.save_model_dir, "best.th")
         torch.save(model, tmp_path)
@@ -161,20 +167,25 @@ class KDTrainer(BaseTrainer):
             
             if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
                 self.model.module.load_state_dict(package['model'])
+                self.discriminator_model.module.load_state_dict(package['disc_model'])
             else:
                 self.model.load_state_dict(package['model'])
+                self.discriminator_model.load_state_dict(package(['disc_model']))
+
                 
             self.optimizer.load_state_dict(package['optimizer'])
+            self.discriminator_model_optimizer.load_state_dict(package['disc_optimizer'])
+
             self.epoch_start = package['epoch'] + 1
             self.best_loss = package['loss']
             self.best_state = package['best_state']
-            self.scaler = package['scaler']
+    
             if self.rank == 0:
                 self.logger.info(f"Model checkpoint loaded. Training will begin at {self.epoch_start} epoch.")
                 self.logger.info(f"Load pretrained info: ")
                 self.logger.info(f"Best loss: {self.best_loss}")
 
-    def forward_generator_step(self, clean, noisy):
+    def forward_step(self, model, clean, noisy, type):
 
         if len(self.augment) > 0:
             sources = torch.stack([noisy - clean, clean])
@@ -193,9 +204,11 @@ class KDTrainer(BaseTrainer):
         clean_spec = power_compress(clean_spec)
         clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
         clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
-
-    
-        est_real, est_imag, _ = self.model(noisy_spec)
+        if type == "teacher":
+            with torch.no_grad():
+                est_real, est_imag, features = model(noisy_spec)
+        else:
+            est_real, est_imag, features = model(noisy_spec)
 
         est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
         est_mag = torch.sqrt(est_real**2 + est_imag**2)
@@ -213,10 +226,16 @@ class KDTrainer(BaseTrainer):
             "clean_imag": clean_imag,
             "clean_mag": clean_mag,
             "est_audio": est_audio,
+            "features": features
         }
 
-    def calculate_generator_loss(self, generator_outputs):
-
+    def calculate_se_loss(self, generator_outputs):
+        predict_fake_metric = self.discriminator_model(
+            generator_outputs["clean_mag"], generator_outputs["est_mag"]
+        )
+        gen_loss_GAN = F.mse_loss(
+            predict_fake_metric.flatten(), generator_outputs["one_labels"].float()
+        )
         loss_mag = F.mse_loss(
             generator_outputs["est_mag"], generator_outputs["clean_mag"]
         )
@@ -232,10 +251,53 @@ class KDTrainer(BaseTrainer):
             self.loss_weights[0] * loss_ri
             + self.loss_weights[1] * loss_mag
             + self.loss_weights[2] * time_loss
+            + self.loss_weights[3] * gen_loss_GAN
         )
+        return loss   
+    
+    def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
+        loss = torch.zeros(1, requires_grad=True).cuda()
+        for criterion, weight in zip(self.criterion_kd_list, self.kd_weight):
+            if isinstance(criterion, AFD):
+                path_dir = f'{self.save_model_dir}/attn_weight'
+                if not os.path.isdir(path_dir):
+                    os.makedirs(path_dir)
+
+                loss_afd, attn = criterion(student_generator_outputs['features'], teacher_generator_outputs['features'])
+                loss += loss_afd * weight
+                if self.idx_step == 0:
+                    file_path = f'{path_dir}/attn_weight_{self.epoch}.json'
+                    with open(file_path, 'w') as f:
+                        json.dump(attn.tolist(), f)
+            else:
+                loss += criterion(student_generator_outputs, teacher_generator_outputs) * weight
+        
         return loss
     
-    def forward_generator_teacher_step(self, clean, enhance_audio):
+    def calculate_discriminator_loss(self, generator_outputs):
+
+        length = generator_outputs["est_audio"].size(-1)
+        # pesq_score = generator_outputs['pesq_label'] / 4.5
+        est_audio_list = list(generator_outputs["est_audio"].detach().cpu().numpy())
+        clean_audio_list = list(generator_outputs["clean"].cpu().numpy()[:, :length])
+        pesq_score = discriminator.batch_pesq(clean_audio_list, est_audio_list)
+
+        # The calculation of PESQ can be None due to silent part
+        if pesq_score is not None:
+            predict_enhance_metric = self.discriminator_model(
+                generator_outputs["clean_mag"], generator_outputs["est_mag"].detach()
+            )
+            predict_max_metric = self.discriminator_model(
+                generator_outputs["clean_mag"], generator_outputs["clean_mag"]
+            )
+            discrim_loss_metric = F.mse_loss(predict_max_metric.flatten(), generator_outputs['one_labels']) \
+                                + F.mse_loss(predict_enhance_metric.flatten(), pesq_score)
+        else:
+            discrim_loss_metric = None
+        
+        return discrim_loss_metric
+
+    def forward_only_teacher_step(self, enhance_audio):
         enhance_spec = torch.view_as_real(torch.stft(enhance_audio, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(), onesided=True, return_complex=True))
         enhance_spec = power_compress(enhance_spec)
         enhance_real = enhance_spec[:, 0, :, :].unsqueeze(1)
@@ -249,95 +311,122 @@ class KDTrainer(BaseTrainer):
             "est_audio": enhance_audio,
         }
     
-    def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
-        loss = torch.zeros(1, requires_grad=True).cuda()
-        for citerion, weight in zip(self.criterion_kd_list, self.kd_weight):
-            loss += citerion(student_generator_outputs, teacher_generator_outputs) * weight
-        
-        return loss
-
     def train_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
-        teacher_enhance = batch[2].cuda()
+        one_labels = torch.ones(clean.size(0)).cuda()
+        teacher_pesq_label = batch[4].cuda()
+        teacher_pesq_label = teacher_pesq_label.type(torch.float32)
 
-        # Normalization
-        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
-        noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
+        if any([isinstance(x, AFD) for x in self.criterion_kd_list]):
+            # Normalization
+            c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+            noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
+            noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
 
-        # Runs the forward pass under autocast.
-        with autocast(enabled = self.use_amp):
-            student_generator_outputs = self.forward_generator_step(clean, noisy)
-            teacher_generator_outputs = self.forward_generator_teacher_step(clean, teacher_enhance)
-
+            # Runs the forward pass under autocast.
+            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+            teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
             student_generator_outputs["clean"] = clean
             student_generator_outputs["noisy"] = noisy
+            student_generator_outputs["one_labels"] = one_labels
+            se_loss = self.calculate_se_loss(student_generator_outputs)
+            kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
+        else:
+            teacher_enhance = batch[2].cuda()
+            # Normalization
+            c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+            noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
+            noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
 
-            loss = self.calculate_generator_loss(student_generator_outputs)
+            # Runs the forward pass under autocast.
+            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+            teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+            student_generator_outputs["clean"] = clean
+            student_generator_outputs["noisy"] = noisy
+            student_generator_outputs["one_labels"] = one_labels
+            se_loss = self.calculate_se_loss(student_generator_outputs)
             kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
-        assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
+        assert se_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {se_loss.dtype}"
 
-        total_loss = loss + kd_loss
-        self.scaler.scale(total_loss).backward(retain_graph=True)
+        
+        loss = se_loss + kd_loss 
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        if self.kd_optimizer is not None:
+            self.kd_optimizer.zero_grad()
+            self.kd_optimizer.step()
+
+        # Train Discriminator
+        student_generator_outputs['pesq_label'] = teacher_pesq_label
+        discriminator_loss = self.calculate_discriminator_loss(student_generator_outputs)
+        
+        if discriminator_loss is not None:
+            self.discriminator_model_optimizer.zero_grad()
+            discriminator_loss.backward()
+            self.discriminator_model_optimizer.step()
+        else:
+            discriminator_loss = torch.tensor([0.0])
 
         # Logging
         # average over devices in ddp
         if self.n_gpus > 1:
-            loss = self.gather(loss).mean()
+            se_loss = self.gather(se_loss).mean()
+            kd_loss = self.gather(kd_loss).mean()
+            discriminator_loss = self.gather(discriminator_loss).mean()
 
-        return loss.item(), kd_loss.item()
+        return se_loss.item(), kd_loss.item(), discriminator_loss.item()
 
 
     def train_epoch(self, epoch) -> None:
         self.model.train()
+        if self.teacher_model is not None:
+            self.teacher_model.eval()
 
         loss_train = []
         se_loss_train = []
         kd_loss_train = []
+        discriminator_loss_train = []
+        self.epoch = epoch
 
         self.logger.info('\n <Epoch>: {} -- Start training '.format(epoch))
         name = f"Train | Epoch {epoch}"
         logprog = LogProgress(self.logger, self.train_ds, updates=self.num_prints, name=name)
 
         for idx, batch in enumerate(logprog):
-            se_loss, kd_loss = self.train_step(batch)
-            loss = se_loss + kd_loss
-            loss_train.append(loss)
+            self.idx_step = idx
+            se_loss, kd_loss, discriminator_loss = self.train_step(batch)
+
+            total_loss = se_loss + kd_loss
+            loss_train.append(total_loss)
             kd_loss_train.append(kd_loss)
             se_loss_train.append(se_loss)
+            discriminator_loss_train.append(discriminator_loss)
         
             if self.rank  == 0:
-                logprog.update(gen_loss=format(loss, ".5f"))
-            
-            # Optimize step
-            if (idx + 1) % self.gradient_accumulation_steps == 0 or idx == len(self.train_ds) - 1:
-                
-                #gradient clipping
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_clip_grad_norm)
+                logprog.update(gen_loss=format(total_loss, ".5f"))
 
-                # update parameters
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad()
-                
 
         loss_train = np.mean(loss_train)
         kd_loss_train = np.mean(kd_loss_train)
         se_loss_train = np.mean(se_loss_train)
+        discriminator_loss_train = np.mean(discriminator_loss_train)
 
-        template = 'Train loss: {} - kd loss: {} - se loss: {}'
-        info = template.format(loss_train, kd_loss_train, se_loss_train)
+        template = 'Train loss: {} - kd loss: {} - se loss: {} - discriminator loss: {}'
+        info = template.format(loss_train, kd_loss_train, se_loss_train, discriminator_loss_train)
         if self.rank == 0:
             # print("Done epoch {} - {}".format(epoch, info))
             self.logger.info('-' * 70)
             self.logger.info(bold(f"     Epoch {epoch} - Overall Summary Training | {info}"))
             self.tsb_writer.add_scalar("Loss/train", loss_train, epoch)
             self.tsb_writer.add_scalar("Loss/train_kd_loss", kd_loss_train, epoch)
-            self.tsb_writer.add_scalar("Loss/train_se_loss", se_loss_train, epoch)    
+            self.tsb_writer.add_scalar("Loss/train_se_loss", se_loss_train, epoch)  
+            self.tsb_writer.add_scalar("Loss/discriminator_loss_train", discriminator_loss_train, epoch)    
             
         # ------------ Valid stage -------------------
         loss_valid = self.valid_epoch(epoch)
@@ -371,28 +460,25 @@ class KDTrainer(BaseTrainer):
             # Save checkpoint
             self.serialize(epoch)
 
-        # self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
+        self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
         self.scheduler.step()
 
     @torch.no_grad()
     def test_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
-        teacher_enhance = batch[2].cuda()
+        one_labels = torch.ones(clean.size(0)).to(self.rank)
 
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
-        noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
+        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
+        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
 
-        # Runs the forward pass under autocast.
-        with autocast(enabled = self.use_amp):
-            student_generator_outputs = self.forward_generator_step(clean, noisy)
-
-            student_generator_outputs["clean"] = clean
-            student_generator_outputs["noisy"] = noisy
-
-            loss = self.calculate_generator_loss(student_generator_outputs)
+        student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+        student_generator_outputs["clean"] = clean
+        student_generator_outputs["noisy"] = noisy
+        student_generator_outputs["one_labels"] = one_labels
+        loss = self.calculate_se_loss(student_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
@@ -405,7 +491,6 @@ class KDTrainer(BaseTrainer):
         return loss.item()
 
     def valid_epoch(self, epoch):
-
         self.model.eval()
 
         loss_total = 0.

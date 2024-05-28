@@ -46,15 +46,13 @@ def load_state_dict_from_checkpoint(checkpoint_path):
     return new_state_dict
 
 def entry(rank, world_size, config, args):
-    # init distributed training
-    # os.environ["CUDA_VISIBLE_DEVICES"] = config["main"]["device_ids"]
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     setup(rank, world_size)
     if rank == 0:
         # This should be needed to be reproducible https://discuss.pytorch.org/t/setting-seed-in-torch-ddp/126638
         set_seed(config["main"]["seed"])
 
-    ## load config
+    #============================ load config
     epochs = config["main"]["epochs"]
     batch_size = config['dataset_train']['dataloader']['batchsize']
     use_amp = config["main"]["use_amp"]
@@ -64,19 +62,13 @@ def entry(rank, world_size, config, args):
     num_prints = config["main"]["num_prints"]
     gradient_accumulation_steps = config["main"]["gradient_accumulation_steps"]
     data_test_dir = config['dataset_test']['path']
-
     init_lr = config['optimizer']['init_lr']
     gamma = config["scheduler"]["gamma"]
     decay_epoch = config['scheduler']['decay_epoch']
     num_channel = config['model']['num_channel']
-    # augment
     remix = config["main"]["augment"]["remix"]
-
-    # feature
     n_fft = config["feature"]["n_fft"]
     hop = config["feature"]["hop"]
-    ndf = config["feature"]["ndf"]
-
     cut_len = int(config["main"]["cut_len"])
     save_model_dir = os.path.join(config["main"]["save_model_dir"], config["main"]['name'] + '/checkpoints')
 
@@ -94,8 +86,7 @@ def entry(rank, world_size, config, args):
     logger.info(f"Argument: {args}")
 
     # Create train dataloader
-    train_ds = dataloader2.load_data(    
-                                        True,
+    train_ds, test_ds = dataloader2.load_data(    
                                         config['dataset_train']['path'], 
                                         batch_size = config['dataset_train']['dataloader']['batchsize'], 
                                         n_cpu = config['dataset_train']['dataloader']['n_worker'], 
@@ -103,17 +94,6 @@ def entry(rank, world_size, config, args):
                                         rank = rank, 
                                         world_size = world_size,
                                         shuffle = config['dataset_train']['sampler']['shuffle']
-                                    )
-
-    test_ds = dataloader2.load_data (    
-                                        False,
-                                        config['dataset_valid']['path'], 
-                                        batch_size = config['dataset_valid']['dataloader']['batchsize'], 
-                                        n_cpu = config['dataset_valid']['dataloader']['n_worker'], 
-                                        cut_len = cut_len, 
-                                        rank = rank, 
-                                        world_size = world_size,
-                                        shuffle = config['dataset_valid']['sampler']['shuffle']
                                     )
 
     logger.info(f"Total iteration through trainset: {len(train_ds)}")
@@ -124,18 +104,8 @@ def entry(rank, world_size, config, args):
 
     # ----- Load student model and teacher model
     model = UNet(n_channels=num_channel, bilinear=True)
-    state_dict = load_state_dict_from_checkpoint(config['main']['teacher_checkpoint'])
-    teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
-    teacher_model.load_state_dict(state_dict)
-    
-    # Distributed model
     model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
-    teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
-    if rank == 0:
-        logger.info(f"---------- Summary for student model")
-        summary(model, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
-    
     # optimizer
     if config['main']['use_ZeRo']:
         optimizer = ZeroRedundancyOptimizer( 
@@ -146,6 +116,18 @@ def entry(rank, world_size, config, args):
     else:
         optimizer = torch.optim.AdamW(model.parameters(), 
                                     lr=init_lr)
+
+    if config['main']['criterion']['AFDLoss']: # need to forward through the teacher backbone to get the feature extractor
+        state_dict = load_state_dict_from_checkpoint(config['main']['teacher_checkpoint'])
+        teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
+        teacher_model.load_state_dict(state_dict)
+        teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
+    else:
+        teacher_model = None
+
+    if rank == 0:
+        logger.info(f"---------- Summary for student model")
+        summary(model, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
 
     # tensorboard writer
     writer = SummaryWriter(os.path.join(save_model_dir, "tsb_log"))
@@ -159,24 +141,28 @@ def entry(rank, world_size, config, args):
     # criterion
     kd_weight = list(config['main']['criterion']['kd_weight'])
 
-    criterion_kd_list = []
+    criterion_kd_list = nn.ModuleList([])
     if config['main']['criterion']['KDLoss']:
         criterion_kd_list.append(KDLoss(weight_ri=config["main"]['loss_weights']["ri"],
                                         weight_mag=config["main"]['loss_weights']["mag"],
                                         weight_time=config["main"]['loss_weights']["time"],
-                                        weight_gan=config["main"]['loss_weights']["gan"]).cuda())
-        
-    elif config['main']['criterion']['PeasonCorrelation']:
-        criterion_kd_list.append(PearsonCorrelation().cuda())
-    elif config['main']['criterion']['AFDLoss']:
+                                        weight_gan=config["main"]['loss_weights']["gan"]))
+    
+    if config['main']['criterion']['AFDLoss']:
         # student: layer [x1,x2,x3,x4], teacher: layer [x2, x3, x4, x5]
         s_shapes = [(batch_size, 32, 321, 210), (batch_size, 64, 160, 100), (batch_size, 128, 80, 50), (batch_size, 256, 40, 25)]
         t_shapes = [(batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101)]
         qk_dim = 512
         criterion_kd_list.append(AFD(t_shapes=t_shapes, 
                                     s_shapes=s_shapes, 
-                                    qk_dim=qk_dim).cuda())
+                                    qk_dim=qk_dim))
 
+    criterion_kd_list = criterion_kd_list.cuda()
+    
+    if len(criterion_kd_list) == 0 or (len(criterion_kd_list) == 1 and isinstance(criterion_kd_list[0], KDLoss)):
+        kd_optimizer = None
+    else:
+        kd_optimizer = torch.optim.AdamW(criterion_kd_list.parameters(), lr=init_lr)
 
     trainer_class = initialize_module(config["trainer"]["path"], initialize=False)
 
@@ -196,10 +182,11 @@ def entry(rank, world_size, config, args):
         test_ds = test_ds,
         scheduler = scheduler,
         optimizer = optimizer,
+        kd_optimizer = kd_optimizer,
         loss_weights = loss_weights,
         hop = hop,
         n_fft = n_fft,
-        scaler = scaler,
+        # scaler = scaler,
         use_amp = use_amp,
         interval_eval = interval_eval,
         max_clip_grad_norm = max_clip_grad_norm,

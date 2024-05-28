@@ -131,6 +131,54 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
           'stoi: ', metrics_avg[5],
           'RTF: ', RTF )
 
+# def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
+#     pesq_label_writer = open("/root/khanhnnm/se/VCTK/test/pesq_label.txt", "w")
+#     n_fft = 400
+#     model = generator.TSCNet(num_channel=64, num_features=n_fft // 2 + 1).cuda()
+#     model.load_state_dict((torch.load(model_path)))
+#     model.eval()
+
+#     if not os.path.exists(saved_dir):
+#         os.mkdir(saved_dir)
+
+#     audio_list = os.listdir(noisy_dir)
+#     audio_list = natsorted(audio_list)
+#     num = len(audio_list)
+#     metrics_total = np.zeros(6)
+#     for audio in audio_list:
+#         noisy_path = os.path.join(noisy_dir, audio)
+#         clean_path = os.path.join(clean_dir, audio)
+#         print("clean path: ", clean_path)
+#         est_audio, length, _ = enhance_one_track(
+#             model, noisy_path, saved_dir, 16000 * 10, n_fft, n_fft // 4, save_tracks
+#         )
+#         clean_audio, sr = sf.read(clean_path)
+#         assert sr == 16000
+#         if est_audio is None:
+#             pesq_label_writer.write("{} {}\n".format(audio, 0.0))
+#         else: 
+#             metrics = compute_metrics(clean_audio, est_audio, sr, 3.5)
+#             metrics = np.array(metrics)
+#             metrics_total += metrics
+#             pesq_label_writer.write("{} {}\n".format(audio, metrics[0]))
+
+#     metrics_avg = metrics_total / num
+#     print(
+#         "pesq: ",
+#         metrics_avg[0],
+#         "csig: ",
+#         metrics_avg[1],
+#         "cbak: ",
+#         metrics_avg[2],
+#         "covl: ",
+#         metrics_avg[3],
+#         "ssnr: ",
+#         metrics_avg[4],
+#         "stoi: ",
+#         metrics_avg[5],
+#     )
+#     pesq_label_writer.close()
+
 def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
     n_fft = 400
     model.eval()

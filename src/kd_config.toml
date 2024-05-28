@@ -1,14 +1,15 @@
 [main]
-name = "CMGAN_unet_32_kd_logit_plus_pearson_corr"
+name = "CMGAN_unet_32_kd_AFD_channel_2"
 seed = 0
 epochs = 150
 cut_len = 32000
-save_model_dir = "/root/se/checkpoint"
+save_model_dir = "/root/khanhnnm/se/checkpoint"
 
 # whether to use Automatic precision to speed up 
 use_amp = false 
 # whether to use ZeroRedundancyOptimizer https://pytorch.org/tutorials/recipes/zero_redundancy_optimizer.html
 use_ZeRo = false 
+teacher_checkpoint = "/root/khanhnnm/se/cmgan_denoiser/src/best_ckpt/ckpt"
 
 # device_ids = "0,1,2"
 sr = 16000
@@ -30,10 +31,9 @@ time = 0.2
 gan =  0.05
 
 [main.criterion]
-KDLoss = true
-PeasonCorrelation = true
-kd_weight = [1.0, 1.0]
-
+KDLoss = false  # kd_logit
+AFDLoss = true
+kd_weight = [1.0]
 
 # Config model
 [model]
@@ -48,7 +48,7 @@ ndf = 16
 
 
 [dataset_train]
-path = "/root/se/VCTK/train"
+path = "/root/khanhnnm/se/VCTK/train"
 [dataset_train.dataloader]
 batchsize = 16
 n_worker = 4
@@ -59,7 +59,7 @@ shuffle = true
 drop_last = true
     
 [dataset_valid]
-path = "/root/se/VCTK/test"
+path = "/root/khanhnnm/se/VCTK/test"
     
 [dataset_valid.dataloader]
 batchsize = 16
@@ -70,7 +70,7 @@ shuffle = true
 drop_last = false 
 
 [dataset_test]
-path = "/root/se/VCTK/test"
+path = "/root/khanhnnm/se/VCTK/test"
 
 
 [optimizer]
@@ -82,4 +82,4 @@ decay_epoch = 20
 gamma = 0.5
 
 [trainer]
-path = "trainer.kd_trainer_fast_final.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast
+path = "trainer.kd_trainer_final_2.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast

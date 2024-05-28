@@ -22,27 +22,33 @@ class nn_bn_relu(nn.Module):
 
 
 class AFD(nn.Module):
-    def __init__(self, args):
+    def __init__(self, t_shapes, s_shapes, qk_dim):
         super(AFD, self).__init__()
 
         # Define fix local variable
-        self.qk_dim = args.qk_dim
-        self.n_t = len(args.t_shapes)
-        self.linear_trans_s = LinearTransformStudent(args)
-        self.linear_trans_t = LinearTransformTeacher(args)
+        self.qk_dim = qk_dim
+        self.n_t = len(t_shapes)
+        self.linear_trans_s = LinearTransformStudent(t_shapes, s_shapes, qk_dim)
+        self.linear_trans_t = LinearTransformTeacher(t_shapes, qk_dim)
 
-        self.p_t = nn.Parameter(torch.Tensor(len(args.t_shapes), args.qk_dim))
-        self.p_s = nn.Parameter(torch.Tensor(len(args.s_shapes), args.qk_dim))
+        self.p_t = nn.Parameter(torch.Tensor(len(t_shapes), qk_dim))
+        self.p_s = nn.Parameter(torch.Tensor(len(s_shapes), qk_dim))
         torch.nn.init.xavier_normal_(self.p_t)
         torch.nn.init.xavier_normal_(self.p_s)
 
+        self.window_size = 1
+        self.local_attention_mask = self.generate_local_attention_mask(len(t_shapes), len(s_shapes), self.window_size).cuda()
+        print("local attention: ", self.local_attention_mask)
+
     def forward(self, g_s, g_t):
+    
         bilinear_key, h_hat_s_all = self.linear_trans_s(g_s)
         query, h_t_all = self.linear_trans_t(g_t)
 
         p_logit = torch.matmul(self.p_t, self.p_s.t())
 
         logit = torch.add(torch.einsum('bstq,btq->bts', bilinear_key, query), p_logit) / np.sqrt(self.qk_dim)
+        # logit = logit + self.local_attention_mask
         atts = F.softmax(logit, dim=2)  # b x t x s
         loss = 0.0
 
@@ -55,22 +61,30 @@ class AFD(nn.Module):
         return loss, atts
 
     def cal_diff(self, v_s, v_t, att):
+        print("v_s shape: ", v_s.shape)
+        print("v_t shape: ", v_t.shape)
+
         diff = (v_s - v_t.unsqueeze(1)).pow(2).mean(2)
         diff = torch.mul(diff, att).sum(1).mean()
         return diff
-
+    
+    def generate_local_attention_mask(self, t_len, s_len, window_size):
+        mask = torch.full((t_len, s_len), float('-inf'))
+        for i in range(t_len):
+            start = max(0, i - window_size)
+            end = min(s_len, i + window_size + 1)
+            mask[i, start:end] = 0
+        return mask
 
 class LinearTransformTeacher(nn.Module):
-    def __init__(self, args):
+    def __init__(self, t_shapes, qk_dim):
         super(LinearTransformTeacher, self).__init__()
-        self.query_layer = nn.ModuleList([nn_bn_relu(t_shape[1], args.qk_dim) for t_shape in args.t_shapes])
-        self.channel_wise_operation = nn.ModuleList([nn.Conv2d(t_shape[1], 1, (3,3), padding=1) for t_shape in args.t_shapes])
+        self.query_layer = nn.ModuleList([nn_bn_relu(t_shape[1], qk_dim) for t_shape in t_shapes])
 
     def forward(self, g_t):
         bs = g_t[0].size(0)
         channel_mean = [f_t.mean(3).mean(2) for f_t in g_t]
-        spatial_mean = [operation(g_t[i]).view(bs, -1) for i, operation in enumerate(self.channel_wise_operation)] 
-        # spatial_mean = [f_t.pow(2).mean(1).view(bs, -1) for f_t in g_t]
+        spatial_mean = [f_t.pow(2).mean(1).view(bs, -1) for f_t in g_t]
 
         query = torch.stack([query_layer(f_t, relu=False) for f_t, query_layer in zip(channel_mean, self.query_layer)],
                             dim=1)
@@ -79,16 +93,16 @@ class LinearTransformTeacher(nn.Module):
 
 
 class LinearTransformStudent(nn.Module):
-    def __init__(self, args):
+    def __init__(self, t_shapes, s_shapes, qk_dim):
         super(LinearTransformStudent, self).__init__()
-        self.t = len(args.t_shapes)
-        self.s = len(args.s_shapes)
-        self.qk_dim = args.qk_dim
+        self.t = len(t_shapes)
+        self.s = len(s_shapes)
+        self.qk_dim = qk_dim
         self.relu = nn.ReLU(inplace=False)
-        self.samplers = nn.ModuleList([Sample(t_shape, args) for t_shape in args.t_shapes])
+        self.samplers = nn.ModuleList([Sample(t_shape) for t_shape in t_shapes])
 
-        self.key_layer = nn.ModuleList([nn_bn_relu(s_shape[1], self.qk_dim) for s_shape in args.s_shapes])
-        self.bilinear = nn_bn_relu(args.qk_dim, args.qk_dim * len(args.t_shapes))
+        self.key_layer = nn.ModuleList([nn_bn_relu(s_shape[1], qk_dim) for s_shape in s_shapes])
+        self.bilinear = nn_bn_relu(qk_dim, qk_dim * len(t_shapes))
 
     def forward(self, g_s):
         bs = g_s[0].size(0)
@@ -103,12 +117,11 @@ class LinearTransformStudent(nn.Module):
 
 
 class Sample(nn.Module):
-    def __init__(self, t_shape, args):
+    def __init__(self, t_shape):
         super(Sample, self).__init__()
         t_N, t_C, t_H, t_W = t_shape
         self.up = torch.nn.Upsample(size=(t_H, t_W), mode='bilinear', align_corners=False)
-        self.channel_wise_operation = nn.ModuleList([nn.Conv2d(s_shape[1], 1, (3,3), padding=1) for s_shape in args.s_shapes])
 
     def forward(self, g_s, bs):
-        g_s = torch.stack([self.up(operation(g_s[i])).view(bs, -1) for i, operation in enumerate(self.channel_wise_operation)], dim=1)
+        g_s = torch.stack([self.up(f_s.pow(2).mean(1, keepdim=True)).view(bs, -1) for f_s in g_s], dim=1)
         return g_s

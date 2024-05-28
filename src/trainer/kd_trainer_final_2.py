@@ -1,16 +1,18 @@
 from base.base_trainer import BaseTrainer
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
+from models import discriminator
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from utils import *
 from typing import Any
 import numpy as np
-import os
 from evaluation import evaluation_model
 from tools.compute_metrics import stoi
 from augment import Remix
 from data.dataloader import load_audio
-from tools.pearson_correlation import PearsonCorrelation
+from tools import AFD
+import os
+import json
 
 
 class KDTrainer(BaseTrainer):
@@ -23,14 +25,15 @@ class KDTrainer(BaseTrainer):
                 epochs,
                 batch_size,
                 model,
+                teacher_model,
                 train_ds,
                 test_ds,
                 scheduler,
                 optimizer,
+                kd_optimizer,
                 loss_weights,
                 hop,
                 n_fft,
-                scaler,
                 use_amp,
                 interval_eval,
                 max_clip_grad_norm,
@@ -42,7 +45,7 @@ class KDTrainer(BaseTrainer):
                 num_prints,
                 logger,
                 kd_weight,
-                kd_args
+                criterion_kd_list,
             ):
 
         super(KDTrainer, self).__init__(
@@ -59,7 +62,10 @@ class KDTrainer(BaseTrainer):
                                 save_model_dir
                             )
         
+        self.kd_optimizer = kd_optimizer
+        self.teacher_model = teacher_model
         self.kd_weight = kd_weight
+        self.criterion_kd_list = criterion_kd_list
         self.optimizer = optimizer
         self.batch_size = batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
@@ -72,7 +78,6 @@ class KDTrainer(BaseTrainer):
 
         self.n_fft = n_fft
         self.hop = hop
-        self.scaler = scaler
 
         self.best_loss = float('inf')
         self.best_state = None
@@ -94,8 +99,6 @@ class KDTrainer(BaseTrainer):
 
         if self.resume:
             self.reset()
-
-        self.pearson_correlation = PearsonCorrelation().cuda()
 
     def gather(self, value: torch.tensor) -> Any:
         # gather value across devices - https://pytorch.org/docs/stable/distributed.html#torch.distributed.all_gather
@@ -124,13 +127,9 @@ class KDTrainer(BaseTrainer):
         package['best_state'] = self.best_state
         package['loss'] = self.best_loss
         package['epoch'] = epoch
-        package['scaler'] = self.scaler
         tmp_path = os.path.join(self.save_model_dir, "checkpoint.tar")
         torch.save(package, tmp_path)
 
-        # Save only the best model, pay attention that don't need to save best discriminator
-        # because when infer time, you only need model to predict, and if better the discriminator
-        # the worse the model ((:
         model = package['best_state']
         tmp_path = os.path.join(self.save_model_dir, "best.th")
         torch.save(model, tmp_path)
@@ -162,18 +161,20 @@ class KDTrainer(BaseTrainer):
                 self.model.module.load_state_dict(package['model'])
             else:
                 self.model.load_state_dict(package['model'])
+
                 
             self.optimizer.load_state_dict(package['optimizer'])
+
             self.epoch_start = package['epoch'] + 1
             self.best_loss = package['loss']
             self.best_state = package['best_state']
-            self.scaler = package['scaler']
+    
             if self.rank == 0:
                 self.logger.info(f"Model checkpoint loaded. Training will begin at {self.epoch_start} epoch.")
                 self.logger.info(f"Load pretrained info: ")
                 self.logger.info(f"Best loss: {self.best_loss}")
 
-    def forward_generator_step(self, clean, noisy):
+    def forward_step(self, model, clean, noisy, type):
 
         if len(self.augment) > 0:
             sources = torch.stack([noisy - clean, clean])
@@ -192,9 +193,11 @@ class KDTrainer(BaseTrainer):
         clean_spec = power_compress(clean_spec)
         clean_real = clean_spec[:, 0, :, :].unsqueeze(1)
         clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
-
-    
-        est_real, est_imag, _ = self.model(noisy_spec)
+        if type == "teacher":
+            with torch.no_grad():
+                est_real, est_imag, features = model(noisy_spec)
+        else:
+            est_real, est_imag, features = model(noisy_spec)
 
         est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
         est_mag = torch.sqrt(est_real**2 + est_imag**2)
@@ -212,10 +215,10 @@ class KDTrainer(BaseTrainer):
             "clean_imag": clean_imag,
             "clean_mag": clean_mag,
             "est_audio": est_audio,
+            "features": features
         }
-    
-    def calculate_generator_loss(self, generator_outputs):
 
+    def calculate_se_loss(self, generator_outputs):
         loss_mag = F.mse_loss(
             generator_outputs["est_mag"], generator_outputs["clean_mag"]
         )
@@ -232,9 +235,28 @@ class KDTrainer(BaseTrainer):
             + self.loss_weights[1] * loss_mag
             + self.loss_weights[2] * time_loss
         )
-        return loss
+        return loss   
     
-    def forward_generator_teacher_step(self, clean, enhance_audio):
+    def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
+        loss = torch.zeros(1, requires_grad=True).cuda()
+        for criterion, weight in zip(self.criterion_kd_list, self.kd_weight):
+            if isinstance(criterion, AFD):
+                path_dir = f'{self.save_model_dir}/attn_weight'
+                if not os.path.isdir(path_dir):
+                    os.makedirs(path_dir)
+
+                loss_afd, attn = criterion(student_generator_outputs['features'], teacher_generator_outputs['features'])
+                loss += loss_afd * weight
+                if self.idx_step == 0:
+                    file_path = f'{path_dir}/attn_weight_{self.epoch}.json'
+                    with open(file_path, 'w') as f:
+                        json.dump(attn.tolist(), f)
+            else:
+                loss += criterion(student_generator_outputs, teacher_generator_outputs) * weight
+        
+        return loss
+
+    def forward_only_teacher_step(self, enhance_audio):
         enhance_spec = torch.view_as_real(torch.stft(enhance_audio, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(), onesided=True, return_complex=True))
         enhance_spec = power_compress(enhance_spec)
         enhance_real = enhance_spec[:, 0, :, :].unsqueeze(1)
@@ -248,100 +270,90 @@ class KDTrainer(BaseTrainer):
             "est_audio": enhance_audio,
         }
     
-    def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
-
-        # loss_mag = F.mse_loss(
-        #     student_generator_outputs["est_mag"], teacher_generator_outputs["est_mag"]
-        # )
-        # loss_ri = F.mse_loss(
-        #     student_generator_outputs["est_real"], teacher_generator_outputs["est_real"]
-        # ) + F.mse_loss(student_generator_outputs["est_imag"], teacher_generator_outputs["est_imag"])
-
-        # time_loss = torch.mean(
-        #     torch.abs(student_generator_outputs["est_audio"] - teacher_generator_outputs["est_audio"])
-        # )
-
-        # loss = (
-        #     self.loss_weights[0] * loss_ri
-        #     + self.loss_weights[1] * loss_mag
-        #     + self.loss_weights[2] * time_loss
-        # )
-
-        pearson_correlation_loss = self.pearson_correlation(student_generator_outputs['est_audio'],
-                                                       teacher_generator_outputs['est_audio'])
-        
-        # print(pearson_correlation_loss)
-        
-        return pearson_correlation_loss
-
     def train_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
-        teacher_enhance = batch[2].cuda()
+        one_labels = torch.ones(clean.size(0)).cuda()
 
-        # Normalization
-        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
-        noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
+        if any([isinstance(x, AFD) for x in self.criterion_kd_list]):
+            # Normalization
+            c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+            noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
+            noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
 
-        # Runs the forward pass under autocast.
-        with autocast(enabled = self.use_amp):
-            student_generator_outputs = self.forward_generator_step(clean, noisy)
-            teacher_generator_outputs = self.forward_generator_teacher_step(clean, teacher_enhance)
-
+            # Runs the forward pass under autocast.
+            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+            teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
             student_generator_outputs["clean"] = clean
             student_generator_outputs["noisy"] = noisy
+            student_generator_outputs["one_labels"] = one_labels
+            se_loss = self.calculate_se_loss(student_generator_outputs)
+            kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
+        else:
+            teacher_enhance = batch[2].cuda()
+            # Normalization
+            c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+            noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
+            noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
 
-            loss = self.calculate_generator_loss(student_generator_outputs)
+            # Runs the forward pass under autocast.
+            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+            teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+            student_generator_outputs["clean"] = clean
+            student_generator_outputs["noisy"] = noisy
+            student_generator_outputs["one_labels"] = one_labels
+            se_loss = self.calculate_se_loss(student_generator_outputs)
             kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
-        assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
+        assert se_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {se_loss.dtype}"
 
-        total_loss = loss + kd_loss
-        self.scaler.scale(total_loss).backward(retain_graph=True)
+        
+        loss = se_loss + kd_loss 
+
+        loss.backward()
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+
+        if self.kd_optimizer is not None:
+            self.kd_optimizer.step()
+            self.kd_optimizer.zero_grad()
 
         # Logging
         # average over devices in ddp
         if self.n_gpus > 1:
-            loss = self.gather(loss).mean()
+            se_loss = self.gather(se_loss).mean()
+            kd_loss = self.gather(kd_loss).mean()
 
-        return loss.item(), kd_loss.item()
+        return se_loss.item(), kd_loss.item()
 
 
     def train_epoch(self, epoch) -> None:
         self.model.train()
+        if self.teacher_model is not None:
+            self.teacher_model.eval()
 
         loss_train = []
         se_loss_train = []
         kd_loss_train = []
+        self.epoch = epoch
 
         self.logger.info('\n <Epoch>: {} -- Start training '.format(epoch))
         name = f"Train | Epoch {epoch}"
         logprog = LogProgress(self.logger, self.train_ds, updates=self.num_prints, name=name)
 
         for idx, batch in enumerate(logprog):
+            self.idx_step = idx
             se_loss, kd_loss = self.train_step(batch)
-            loss = se_loss + kd_loss
-            loss_train.append(loss)
+
+            total_loss = se_loss + kd_loss
+            loss_train.append(total_loss)
             kd_loss_train.append(kd_loss)
             se_loss_train.append(se_loss)
         
             if self.rank  == 0:
-                logprog.update(gen_loss=format(loss, ".5f"))
-            
-            # Optimize step
-            if (idx + 1) % self.gradient_accumulation_steps == 0 or idx == len(self.train_ds) - 1:
-                
-                #gradient clipping
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_clip_grad_norm)
+                logprog.update(gen_loss=format(total_loss, ".5f"))
 
-                # update parameters
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad()
-                
 
         loss_train = np.mean(loss_train)
         kd_loss_train = np.mean(kd_loss_train)
@@ -355,7 +367,7 @@ class KDTrainer(BaseTrainer):
             self.logger.info(bold(f"     Epoch {epoch} - Overall Summary Training | {info}"))
             self.tsb_writer.add_scalar("Loss/train", loss_train, epoch)
             self.tsb_writer.add_scalar("Loss/train_kd_loss", kd_loss_train, epoch)
-            self.tsb_writer.add_scalar("Loss/train_se_loss", se_loss_train, epoch)    
+            self.tsb_writer.add_scalar("Loss/train_se_loss", se_loss_train, epoch)     
             
         # ------------ Valid stage -------------------
         loss_valid = self.valid_epoch(epoch)
@@ -389,28 +401,25 @@ class KDTrainer(BaseTrainer):
             # Save checkpoint
             self.serialize(epoch)
 
-        # self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
+        self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
         self.scheduler.step()
 
     @torch.no_grad()
     def test_step(self, batch):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
-        teacher_enhance = batch[2].cuda()
+        one_labels = torch.ones(clean.size(0)).to(self.rank)
 
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
-        noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
+        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
+        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
 
-        # Runs the forward pass under autocast.
-        with autocast(enabled = self.use_amp):
-            student_generator_outputs = self.forward_generator_step(clean, noisy)
-
-            student_generator_outputs["clean"] = clean
-            student_generator_outputs["noisy"] = noisy
-
-            loss = self.calculate_generator_loss(student_generator_outputs)
+        student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+        student_generator_outputs["clean"] = clean
+        student_generator_outputs["noisy"] = noisy
+        student_generator_outputs["one_labels"] = one_labels
+        loss = self.calculate_se_loss(student_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {loss.dtype}"
@@ -423,7 +432,6 @@ class KDTrainer(BaseTrainer):
         return loss.item()
 
     def valid_epoch(self, epoch):
-
         self.model.eval()
 
         loss_total = 0.

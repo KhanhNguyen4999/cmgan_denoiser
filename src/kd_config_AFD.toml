@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_32_kd_AFD"
+name = "CMGAN_unet_32_kd_AFD_test"
 seed = 0
 epochs = 150
 cut_len = 32000
@@ -50,9 +50,9 @@ ndf = 16
 
 
 [dataset_train]
-path = "/root/se/VCTK/train"
+path = "/root/se/VCTK/test"
 [dataset_train.dataloader]
-batchsize = 16
+batchsize = 8
 n_worker = 4
 pin_memory = true
 
@@ -64,7 +64,7 @@ drop_last = true
 path = "/root/se/VCTK/test"
     
 [dataset_valid.dataloader]
-batchsize = 16
+batchsize = 8
 n_worker = 4
 
 [dataset_valid.sampler]
