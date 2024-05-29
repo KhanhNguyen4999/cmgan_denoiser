@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_32_kd_AFD_channel_2"
+name = "CMGAN_unet_32_bilinear_discriminator_2"
 seed = 0
 epochs = 150
 cut_len = 32000
@@ -32,8 +32,8 @@ gan =  0.05
 
 [main.criterion]
 KDLoss = false  # kd_logit
-AFDLoss = true
-kd_weight = [1.0]
+AFDLoss = false
+kd_weight = []
 
 # Config model
 [model]
@@ -82,4 +82,4 @@ decay_epoch = 20
 gamma = 0.5
 
 [trainer]
-path = "trainer.kd_trainer_final_2.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast
+path = "trainer.kd_trainer_final_discriminator.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast

@@ -359,8 +359,8 @@ class KDTrainer(BaseTrainer):
         self.optimizer.zero_grad()
 
         if self.kd_optimizer is not None:
-            self.kd_optimizer.zero_grad()
             self.kd_optimizer.step()
+            self.kd_optimizer.zero_grad()
 
         # Train Discriminator
         student_generator_outputs['pesq_label'] = teacher_pesq_label
