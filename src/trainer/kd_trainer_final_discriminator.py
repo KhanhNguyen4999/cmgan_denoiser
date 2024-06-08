@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 from evaluation import evaluation_model
 from tools.compute_metrics import stoi
-from augment import Remix
+from augment import Remix, SNRScale
 from data.dataloader import load_audio
 from tools import AFD
 import os
@@ -94,9 +94,11 @@ class KDTrainer(BaseTrainer):
         self.discriminator_model_optimizer = discriminator_optimizer
 
         # data augment
+        self.remix = remix
         augments = []
         if remix:
             augments.append(Remix())
+            self.snr_scaler = SNRScale()
         self.augment = torch.nn.Sequential(*augments)
 
         if not os.path.exists(self.save_enhanced_dir):
@@ -186,12 +188,6 @@ class KDTrainer(BaseTrainer):
                 self.logger.info(f"Best loss: {self.best_loss}")
 
     def forward_step(self, model, clean, noisy, type):
-
-        if len(self.augment) > 0:
-            sources = torch.stack([noisy - clean, clean])
-            sources = self.augment(sources)
-            noise, clean = sources
-            noisy = noise + clean
 
         noisy_spec = torch.view_as_real(torch.stft(noisy, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(),
                                 onesided=True,
@@ -339,10 +335,22 @@ class KDTrainer(BaseTrainer):
             noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
             noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
 
-            # Runs the forward pass under autocast.
-            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
-            #teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+            if self.remix:
+                sources = torch.stack([noisy - clean, clean])
+                sources = self.augment(sources)
+                noise, clean = sources
+                noisy = noise + clean
+
+            # teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
             teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
+
+            if self.remix:
+                sources = self.snr_scaler([noisy, clean], snr_scale=1.2)
+                scaled_noise, clean = sources
+                noisy = scaled_noise + clean
+
+            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+            
             student_generator_outputs["clean"] = clean
             student_generator_outputs["noisy"] = noisy
             student_generator_outputs["one_labels"] = one_labels
