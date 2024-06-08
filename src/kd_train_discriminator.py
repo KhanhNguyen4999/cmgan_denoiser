@@ -109,13 +109,13 @@ def entry(rank, world_size, config, args):
                                 lr=init_lr)
     optimizer_disc = torch.optim.AdamW(discriminator_model.parameters(), lr=2 * init_lr)
 
-    if config['main']['criterion']['AFDLoss']: # need to forward through the teacher backbone to get the feature extractor
-        state_dict = load_state_dict_from_checkpoint(config['main']['teacher_checkpoint'])
-        teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
-        teacher_model.load_state_dict(state_dict)
-        teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
-    else:
-        teacher_model = None
+    #if config['main']['criterion']['AFDLoss']: # need to forward through the teacher backbone to get the feature extractor
+    state_dict = load_state_dict_from_checkpoint(config['main']['teacher_checkpoint'])
+    teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
+    teacher_model.load_state_dict(state_dict)
+    teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
+    #else:
+     #   teacher_model = None
 
     if rank == 0:
         logger.info(f"---------- Summary for student model")

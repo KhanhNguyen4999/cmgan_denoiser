@@ -341,7 +341,8 @@ class KDTrainer(BaseTrainer):
 
             # Runs the forward pass under autocast.
             student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
-            teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+            #teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+            teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
             student_generator_outputs["clean"] = clean
             student_generator_outputs["noisy"] = noisy
             student_generator_outputs["one_labels"] = one_labels

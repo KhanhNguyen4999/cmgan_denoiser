@@ -85,12 +85,12 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
     from collections import OrderedDict
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
-        name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
-        # name = k
+        #name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
+        name = k
         new_state_dict[name] = v
 
-    # model = generator.TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
-    model = UNet(n_channels=3, bilinear=True)
+    model = generator.TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
+    #model = UNet(n_channels=3, bilinear=True)
     model.load_state_dict(new_state_dict)
     model.eval()
     model = model.cuda()
@@ -105,7 +105,7 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
                 delayed(enhance_one_track)(model, 
                                             os.path.join(noisy_dir, audio),
                                             saved_dir,
-                                            16000*10, 
+                                            16000*2, 
                                             n_fft, 
                                             n_fft//4, 
                                             save_tracks
