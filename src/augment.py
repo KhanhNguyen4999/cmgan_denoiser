@@ -35,11 +35,12 @@ class SNRScale(nn.Module):
         
         # Define the SNR reduction
         current_snr_db = 20 * torch.log10(rmsclean / (rmsnoise + 1e-8))
+        #print("---Current SNR:", current_snr_db)
         # snr_scale = 0.8  # Reduce SNR to 80%
         desired_snr_db = current_snr_db * snr_scale
-
+        #print("---Desired SNR:", desired_snr_db)
         # Calculate the new scaling factor for noise
-        desired_snr_linear = 10 ** (desired_snr_db / 20.0)
+        desired_snr_linear = 20 ** (desired_snr_db / 10.0)
         noisescalar = rmsclean / (rmsnoise * desired_snr_linear)
 
         # Scale the noise with the new scaling factor

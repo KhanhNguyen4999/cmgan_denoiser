@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_32_kd_logit_discriminator_remix"
+name = "CMGAN_unet_32_bilinear_remix"
 seed = 0
 epochs = 150
 cut_len = 32000
@@ -31,9 +31,9 @@ time = 0.2
 gan =  0.05
 
 [main.criterion]
-KDLoss = true  # kd_logit
+KDLoss = false  # kd_logit
 AFDLoss = false
-kd_weight = [1.0]
+kd_weight = []
 
 # Config model
 [model]
@@ -82,4 +82,4 @@ decay_epoch = 20
 gamma = 0.5
 
 [trainer]
-path = "trainer.kd_trainer_final_discriminator.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast
+path = "trainer.kd_trainer_final.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast
