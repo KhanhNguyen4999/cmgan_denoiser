@@ -66,6 +66,7 @@ def entry(rank, world_size, config, args):
     decay_epoch = config['scheduler']['decay_epoch']
     num_channel = config['model']['num_channel']
     remix = config["main"]["augment"]["remix"]
+    remix_snr = config["main"]["augment"]["snr_remix"]
     n_fft = config["feature"]["n_fft"]
     hop = config["feature"]["hop"]
     cut_len = int(config["main"]["cut_len"])
@@ -184,6 +185,7 @@ def entry(rank, world_size, config, args):
         max_clip_grad_norm = max_clip_grad_norm,
         gradient_accumulation_steps = gradient_accumulation_steps,
         remix = remix,
+        remix_snr = remix_snr,
         save_model_dir = save_model_dir,
         data_test_dir = data_test_dir,
         tsb_writer = writer,

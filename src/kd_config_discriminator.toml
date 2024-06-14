@@ -22,6 +22,7 @@ num_prints = 5
 # augmentation method
 [main.augment]
 remix = true
+remix_snr = true
 
 # You can experiment on different weights for final loss combination
 [main.loss_weights]

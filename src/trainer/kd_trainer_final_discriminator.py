@@ -39,6 +39,7 @@ class KDTrainer(BaseTrainer):
                 max_clip_grad_norm,
                 gradient_accumulation_steps,
                 remix,
+                remix_snr,
                 save_model_dir,
                 data_test_dir,
                 tsb_writer,
@@ -95,10 +96,12 @@ class KDTrainer(BaseTrainer):
 
         # data augment
         self.remix = remix
+        self.remix_snr = remix_snr
         augments = []
         if remix:
             augments.append(Remix())
-            self.snr_scaler = SNRScale()
+        
+        self.snr_scaler = SNRScale()
         self.augment = torch.nn.Sequential(*augments)
 
         if not os.path.exists(self.save_enhanced_dir):
@@ -335,16 +338,16 @@ class KDTrainer(BaseTrainer):
             noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
             noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
 
-            #if self.remix:
-            #    sources = torch.stack([noisy - clean, clean])
-            #    sources = self.augment(sources)
-            #    noise, clean = sources
-            #    noisy = noise + clean
-
-            teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
-            #teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
-
             if self.remix:
+                sources = torch.stack([noisy - clean, clean])
+                sources = self.augment(sources)
+                noise, clean = sources
+                noisy = noise + clean
+                teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
+            else:
+                teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+
+            if self.remix_snr:
                 sources = self.snr_scaler([noisy, clean], snr_scale=0.8)
                 scaled_noise, clean = sources
                 noisy = scaled_noise + clean
