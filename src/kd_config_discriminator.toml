@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_32_bilinear_mix_snr"
+name = "CMGAN_unet_32_kd_logit_discriminator_mix_snr"
 seed = 0
 epochs = 150
 cut_len = 32000
@@ -21,7 +21,7 @@ num_prints = 5
 
 # augmentation method
 [main.augment]
-remix = true
+remix = false
 remix_snr = true
 
 # You can experiment on different weights for final loss combination
@@ -32,9 +32,9 @@ time = 0.2
 gan =  0.05
 
 [main.criterion]
-KDLoss = false  # kd_logit
+KDLoss = true  # kd_logit
 AFDLoss = false
-kd_weight = []
+kd_weight = [1.0]
 
 # Config model
 [model]

@@ -1,7 +1,7 @@
 [main]
-name = "CMGAN_unet_32_bilinear_remix"
+name = "CMGAN_unet_32_kd_logit_discriminator_remix_remix_snr_random"
 seed = 0
-epochs = 150
+epochs = 100
 cut_len = 32000
 save_model_dir = "/root/khanhnnm/se/checkpoint"
 
@@ -22,7 +22,7 @@ num_prints = 5
 # augmentation method
 [main.augment]
 remix = true
-remix_snr = false
+remix_snr = true
 
 # You can experiment on different weights for final loss combination
 [main.loss_weights]
@@ -32,9 +32,9 @@ time = 0.2
 gan =  0.05
 
 [main.criterion]
-KDLoss = false  # kd_logit
+KDLoss = true  # kd_logit
 AFDLoss = false
-kd_weight = []
+kd_weight = [1.0]
 
 # Config model
 [model]
@@ -83,4 +83,4 @@ decay_epoch = 20
 gamma = 0.5
 
 [trainer]
-path = "trainer.kd_trainer_final.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast
+path = "trainer.kd_trainer_final_discriminator_duplicate.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast
