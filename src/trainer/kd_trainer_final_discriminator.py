@@ -317,48 +317,37 @@ class KDTrainer(BaseTrainer):
         teacher_pesq_label = batch[4].cuda()
         teacher_pesq_label = teacher_pesq_label.type(torch.float32)
 
+        teacher_enhance = batch[2].cuda()
+        # Normalization
+        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
+        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
+
+        if self.remix:
+            sources = torch.stack([noisy - clean, clean])
+            sources = self.augment(sources)
+            noise, clean = sources
+            noisy = noise + clean
+        
         if any([isinstance(x, AFD) for x in self.criterion_kd_list]):
-            # Normalization
-            c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-            noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
-            noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
-
-            # Runs the forward pass under autocast.
-            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
             teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
-            student_generator_outputs["clean"] = clean
-            student_generator_outputs["noisy"] = noisy
-            student_generator_outputs["one_labels"] = one_labels
-            se_loss = self.calculate_se_loss(student_generator_outputs)
-            kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
         else:
-            teacher_enhance = batch[2].cuda()
-            # Normalization
-            c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-            noisy, clean, teacher_enhance = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(teacher_enhance, 0, 1)
-            noisy, clean, teacher_enhance = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(teacher_enhance * c, 0, 1) 
+            teacher_enhance = torch.transpose(teacher_enhance, 0, 1)
+            teacher_enhance = torch.transpose(teacher_enhance * c, 0, 1) 
+            teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
 
-            if self.remix:
-                sources = torch.stack([noisy - clean, clean])
-                sources = self.augment(sources)
-                noise, clean = sources
-                noisy = noise + clean
-                teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
-            else:
-                teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+        if self.remix_snr:
+            sources = self.snr_scaler([noisy, clean], snr_scale=0.8)
+            scaled_noise, clean = sources
+            noisy = scaled_noise + clean
 
-            if self.remix_snr:
-                sources = self.snr_scaler([noisy, clean], snr_scale=0.8)
-                scaled_noise, clean = sources
-                noisy = scaled_noise + clean
-
-            student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
-            
-            student_generator_outputs["clean"] = clean
-            student_generator_outputs["noisy"] = noisy
-            student_generator_outputs["one_labels"] = one_labels
-            se_loss = self.calculate_se_loss(student_generator_outputs)
-            kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
+        student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
+        
+        student_generator_outputs["clean"] = clean
+        student_generator_outputs["noisy"] = noisy
+        student_generator_outputs["one_labels"] = one_labels
+        se_loss = self.calculate_se_loss(student_generator_outputs)
+        kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert se_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {se_loss.dtype}"

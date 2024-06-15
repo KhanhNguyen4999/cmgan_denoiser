@@ -27,14 +27,13 @@ class ChannelWeight(nn.Module):
         self.weight = nn.Parameter(torch.randn(d))
         self.weight.requires_grad = True
     
-    def forward(self, teacher_f, student_f, attn):
+    def forward(self, teacher_f, student_f):
         bs, channel, t, f = teacher_f.size()
         teacher_f = teacher_f.view(bs, channel, -1)
         student_f = student_f.view(bs, channel, -1)
 
         diff = (teacher_f - student_f).pow(2).mean(2)
         diff = torch.mul(diff, F.softmax(self.weight)).sum(1)
-        diff = torch.mul(diff, attn).mean() # mean by batch
         return diff
 
 
@@ -82,6 +81,8 @@ class AFD(nn.Module):
             h_t = g_t[t_index]
             h_s = h_hat_s_all[t_index][s_index]
             diff = self.channel_diff[i](h_t, h_s, atts[:, t_index, s_index])
+            attn = atts[:, t_index, s_index]
+            diff = torch.mul(diff, attn).mean() # mean by batch
             loss += diff
 
         return loss, atts
