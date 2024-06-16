@@ -6,7 +6,7 @@ import logging
 import argparse
 from utils import *
 
-from models.unet import UNet
+from models.unet import UNet64, UNet32
 from models.generator import TSCNet
 from time import gmtime, strftime
 from data import dataloader2
@@ -100,7 +100,7 @@ def entry(rank, world_size, config, args):
     logger.info(f"Total iteration through testset: {len(test_ds)}")
 
     # ----- Load student model and teacher model
-    model = UNet(n_channels=num_channel, bilinear=True)
+    model = UNet32(n_channels=num_channel, bilinear=True)
     model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
     # optimizer

@@ -6,7 +6,7 @@ import logging
 import argparse
 from utils import *
 
-from models.unet import UNet
+from models.unet import UNet32, UNet64
 from models.generator import TSCNet
 from models import discriminator
 from time import gmtime, strftime
@@ -70,6 +70,7 @@ def entry(rank, world_size, config, args):
     n_fft = config["feature"]["n_fft"]
     hop = config["feature"]["hop"]
     cut_len = int(config["main"]["cut_len"])
+    student_model = config["main"]["cut_len"]
     save_model_dir = os.path.join(config["main"]["save_model_dir"], config["main"]['name'] + '/checkpoints')
 
     if rank == 0:
@@ -100,7 +101,11 @@ def entry(rank, world_size, config, args):
     logger.info(f"Total iteration through testset: {len(test_ds)}")
 
     # ----- Load student model and teacher model
-    model = UNet(n_channels=num_channel, bilinear=True)
+    if student_model == 'Unet32':
+        model = UNet32(n_channels=num_channel, bilinear=True)
+    else:
+        model = UNet64(n_channels=num_channel, bilinear=True)
+
     model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
     discriminator_model = discriminator.Discriminator(ndf=16).cuda()
@@ -143,7 +148,11 @@ def entry(rank, world_size, config, args):
     
     if config['main']['criterion']['AFDLoss']:
         # student: layer [x1,x2,x3,x4], teacher: layer [x2, x3, x4, x5]
-        s_shapes = [(batch_size, 32, 321, 210), (batch_size, 64, 160, 100), (batch_size, 128, 80, 50), (batch_size, 256, 40, 25)]
+        if student_model == 'Unet32':
+            s_shapes = [(batch_size, 32, 321, 210), (batch_size, 64, 160, 100), (batch_size, 128, 80, 50), (batch_size, 256, 40, 25)]
+        else:
+            s_shapes = [(batch_size, 64, 321, 210), (batch_size, 128, 160, 100), (batch_size, 256, 80, 50), (batch_size, 512, 40, 25)]
+
         t_shapes = [(batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101)]
         qk_dim = 512
         criterion_kd_list.append(AFD(t_shapes=t_shapes, 
