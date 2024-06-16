@@ -80,7 +80,7 @@ class AFD(nn.Module):
         for i, (t_index, s_index) in enumerate(self.pairs):
             h_t = g_t[t_index]
             h_s = h_hat_s_all[t_index][s_index]
-            diff = self.channel_diff[i](h_t, h_s, atts[:, t_index, s_index])
+            diff = self.channel_diff[i](h_t, h_s)
             attn = atts[:, t_index, s_index]
             diff = torch.mul(diff, attn).mean() # mean by batch
             loss += diff
