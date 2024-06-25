@@ -132,7 +132,6 @@ class Attention(nn.Module):
         attn = dots.softmax(dim = -1)
 
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
-        # out = attn @ v
         out = rearrange(out, 'b h n d -> b n (h d)')
         out = self.to_out(out)
         return self.dropout(out)

@@ -11,6 +11,7 @@ from tools.compute_metrics import stoi
 from augment import Remix, SNRScale
 from data.dataloader import load_audio
 from tools import AFD
+from tools.AKD import AKD
 import os
 import json
 
@@ -30,6 +31,7 @@ class KDTrainer(BaseTrainer):
                 test_ds,
                 scheduler,
                 scheduler_D,
+                scheduler_KD,
                 optimizer,
                 kd_optimizer,
                 loss_weights,
@@ -74,6 +76,7 @@ class KDTrainer(BaseTrainer):
         
         self.scheduler = scheduler
         self.scheduler_D = scheduler_D
+        self.scheduler_KD = scheduler_KD
 
         self.loss_weights = loss_weights
         self.tsb_writer = tsb_writer
@@ -256,20 +259,12 @@ class KDTrainer(BaseTrainer):
     
     def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
         loss = torch.zeros(1, requires_grad=True).cuda()
-        for criterion, weight in zip(self.criterion_kd_list, self.kd_weight):
-            if isinstance(criterion, AFD):
-                path_dir = f'{self.save_model_dir}/attn_weight'
-                if not os.path.isdir(path_dir):
-                    os.makedirs(path_dir)
-
-                loss_afd, attn = criterion(student_generator_outputs['features'], teacher_generator_outputs['features'])
-                loss += loss_afd * weight
-                if self.idx_step == 0:
-                    file_path = f'{path_dir}/attn_weight_{self.epoch}.json'
-                    with open(file_path, 'w') as f:
-                        json.dump(attn.tolist(), f)
+        for criterion, weight in zip(self.criterion_kd_list, self.kd_weight):            
+            if isinstance(criterion, AFD) or isinstance(criterion, AKD):
+                loss += criterion(student_generator_outputs['features'], teacher_generator_outputs['features']) * weight
             else:
                 loss += criterion(student_generator_outputs, teacher_generator_outputs) * weight
+
         
         return loss
     
@@ -318,18 +313,18 @@ class KDTrainer(BaseTrainer):
         teacher_pesq_label = teacher_pesq_label.type(torch.float32)
 
         teacher_enhance = batch[2].cuda()
-        # Normalization
-        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
-        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
 
         if self.remix:
             sources = torch.stack([noisy - clean, clean])
             sources = self.augment(sources)
             noise, clean = sources
             noisy = noise + clean
+
+        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
+        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
         
-        if any([isinstance(x, AFD) for x in self.criterion_kd_list]):
+        if any([isinstance(x, AFD) or isinstance(x, AKD) for x in self.criterion_kd_list]):
             teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
         else:
             teacher_enhance = torch.transpose(teacher_enhance, 0, 1)
@@ -464,6 +459,8 @@ class KDTrainer(BaseTrainer):
         self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
         self.scheduler.step()
         self.scheduler_D.step()
+        if self.scheduler_KD is not None:
+            self.scheduler_KD.step()
 
 
     @torch.no_grad()

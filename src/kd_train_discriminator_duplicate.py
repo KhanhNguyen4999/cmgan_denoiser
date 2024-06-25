@@ -6,7 +6,7 @@ import logging
 import argparse
 from utils import *
 
-from models.unet import UNet32, UNet64
+from models.unet import UNet16, UNet32, UNet64
 from models.generator import TSCNet
 from models import discriminator
 from time import gmtime, strftime
@@ -17,6 +17,7 @@ from torchinfo import summary
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 from tools import KDLoss, PearsonCorrelation, AFD
+# from tools.AFD_kullback_leiber import AFD
 
 warnings.filterwarnings('ignore')
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
@@ -70,7 +71,7 @@ def entry(rank, world_size, config, args):
     n_fft = config["feature"]["n_fft"]
     hop = config["feature"]["hop"]
     cut_len = int(config["main"]["cut_len"])
-    student_model = config["main"]["cut_len"]
+    student_model = config["main"]["student_model"]
     save_model_dir = os.path.join(config["main"]["save_model_dir"], config["main"]['name'] + '/checkpoints')
 
     if rank == 0:
@@ -101,7 +102,9 @@ def entry(rank, world_size, config, args):
     logger.info(f"Total iteration through testset: {len(test_ds)}")
 
     # ----- Load student model and teacher model
-    if student_model == 'Unet32':
+    if student_model == 'Unet16':
+        model = UNet16(n_channels=num_channel, bilinear=True)
+    elif student_model == 'Unet32':
         model = UNet32(n_channels=num_channel, bilinear=True)
     else:
         model = UNet64(n_channels=num_channel, bilinear=True)
@@ -154,10 +157,7 @@ def entry(rank, world_size, config, args):
             s_shapes = [(batch_size, 64, 321, 210), (batch_size, 128, 160, 100), (batch_size, 256, 80, 50), (batch_size, 512, 40, 25)]
 
         t_shapes = [(batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101)]
-        qk_dim = 512
-        criterion_kd_list.append(AFD(t_shapes=t_shapes, 
-                                    s_shapes=s_shapes, 
-                                    qk_dim=qk_dim))
+        criterion_kd_list.append(AFD(s_shapes=s_shapes, t_shapes=t_shapes))
 
     criterion_kd_list = criterion_kd_list.cuda()
     
@@ -167,7 +167,6 @@ def entry(rank, world_size, config, args):
         kd_optimizer = torch.optim.AdamW(criterion_kd_list.parameters(), lr=init_lr)
 
     trainer_class = initialize_module(config["trainer"]["path"], initialize=False)
-
     # scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
     scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=decay_epoch, gamma=gamma)

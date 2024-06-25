@@ -16,7 +16,9 @@ from torch.nn.parallel import DistributedDataParallel
 from torchinfo import summary
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
-from tools import KDLoss, PearsonCorrelation, AFD
+from tools import KDLoss
+from tools.AFD_kullback_leiber import AFD
+from tools.AKD import AKD
 
 warnings.filterwarnings('ignore')
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
@@ -70,7 +72,7 @@ def entry(rank, world_size, config, args):
     n_fft = config["feature"]["n_fft"]
     hop = config["feature"]["hop"]
     cut_len = int(config["main"]["cut_len"])
-    student_model = config["main"]["cut_len"]
+    student_model = config["main"]["student_model"]
     save_model_dir = os.path.join(config["main"]["save_model_dir"], config["main"]['name'] + '/checkpoints')
 
     if rank == 0:
@@ -111,17 +113,13 @@ def entry(rank, world_size, config, args):
     discriminator_model = discriminator.Discriminator(ndf=16).cuda()
     discriminator_model = DistributedDataParallel(discriminator_model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
-    optimizer = torch.optim.AdamW(model.parameters(), 
-                                lr=init_lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=init_lr)
     optimizer_disc = torch.optim.AdamW(discriminator_model.parameters(), lr=2 * init_lr)
 
-    #if config['main']['criterion']['AFDLoss']: # need to forward through the teacher backbone to get the feature extractor
     state_dict = load_state_dict_from_checkpoint(config['main']['teacher_checkpoint'])
     teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
     teacher_model.load_state_dict(state_dict)
     teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
-    #else:
-     #   teacher_model = None
 
     if rank == 0:
         logger.info(f"---------- Summary for student model")
@@ -138,7 +136,6 @@ def entry(rank, world_size, config, args):
 
     # criterion
     kd_weight = list(config['main']['criterion']['kd_weight'])
-
     criterion_kd_list = nn.ModuleList([])
     if config['main']['criterion']['KDLoss']:
         criterion_kd_list.append(KDLoss(weight_ri=config["main"]['loss_weights']["ri"],
@@ -152,12 +149,17 @@ def entry(rank, world_size, config, args):
             s_shapes = [(batch_size, 32, 321, 210), (batch_size, 64, 160, 100), (batch_size, 128, 80, 50), (batch_size, 256, 40, 25)]
         else:
             s_shapes = [(batch_size, 64, 321, 210), (batch_size, 128, 160, 100), (batch_size, 256, 80, 50), (batch_size, 512, 40, 25)]
+        t_shapes = [(batch_size, 64, 321, 101)] * 4
+        criterion_kd_list.append(AFD(s_shapes=s_shapes, t_shapes=t_shapes))
 
-        t_shapes = [(batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101)]
-        qk_dim = 512
-        criterion_kd_list.append(AFD(t_shapes=t_shapes, 
-                                    s_shapes=s_shapes, 
-                                    qk_dim=qk_dim))
+    if config['main']['criterion']['AKD']:
+        if student_model == 'Unet32':
+            s_shapes = [(batch_size, 256, 40, 25)]
+        else:
+            s_shapes = [(batch_size, 64, 321, 210), (batch_size, 128, 160, 100), (batch_size, 256, 80, 50), (batch_size, 512, 40, 25)]
+
+        t_shapes = [(batch_size, 64, 321, 101)]
+        criterion_kd_list.append(AKD(s_shapes=s_shapes, t_shapes=t_shapes))
 
     criterion_kd_list = criterion_kd_list.cuda()
     
@@ -171,6 +173,10 @@ def entry(rank, world_size, config, args):
     # scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
     scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=decay_epoch, gamma=gamma)
+    if kd_optimizer is not None:
+        scheduler_KD = torch.optim.lr_scheduler.StepLR(kd_optimizer, step_size=decay_epoch, gamma=gamma)
+    else:
+        scheduler_KD = None
 
     trainer = trainer_class(
         dist = dist,
@@ -185,6 +191,7 @@ def entry(rank, world_size, config, args):
         test_ds = test_ds,
         scheduler = scheduler,
         scheduler_D = scheduler_D,
+        scheduler_KD = scheduler_KD,
         optimizer = optimizer,
         kd_optimizer = kd_optimizer,
         loss_weights = loss_weights,

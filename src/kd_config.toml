@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_64_kd_logit_discriminator_remix"
+name = "CMGAN_unet_16_bilinear_discriminator_remix"
 seed = 0
 epochs = 100
 cut_len = 32000
@@ -10,7 +10,7 @@ use_amp = false
 # whether to use ZeroRedundancyOptimizer https://pytorch.org/tutorials/recipes/zero_redundancy_optimizer.html
 use_ZeRo = false 
 teacher_checkpoint = "/root/khanhnnm/se/cmgan_denoiser/src/best_ckpt/ckpt"
-student_model = Unet32
+student_model = "Unet16"
 
 # device_ids = "0,1,2"
 sr = 16000
@@ -33,9 +33,9 @@ time = 0.2
 gan =  0.05
 
 [main.criterion]
-KDLoss = true  # kd_logit
+KDLoss = false  # kd_logit
 AFDLoss = false
-kd_weight = [1.0]
+kd_weight = []
 
 # Config model
 [model]
@@ -79,9 +79,8 @@ path = "/root/khanhnnm/se/VCTK/test"
 init_lr = 5e-3
 
 [scheduler]
-
 decay_epoch = 20
 gamma = 0.5
 
 [trainer]
-path = "trainer.kd_trainer_final_discriminator_duplicate.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast
+path = "trainer.kd_trainer_final_discriminator.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast

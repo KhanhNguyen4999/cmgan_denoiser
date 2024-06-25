@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch
 import numpy as np
 from models.conformer import Attention
+import math
 
 class SelfAttention(nn.Module):
     def __init__(self, embed_dim, num_heads):
@@ -59,64 +60,83 @@ class nn_bn_relu(nn.Module):
             return self.relu(self.bn(self.linear(x)))
         return self.linear(x)
 
-class AKD(nn.Module):
-    def __init__(self, args):
-        super(AKD, self).__init__()
-        # (b, 256, 40, 25) -> (b*t, 25, 256)
-        # (b, 64, 321, 101)
-       # hardcode get the first layer in student and teacher
-        self.attn_t = Attention(dim = args.s_shapes[0][1],
-                            heads = 2,
-                            dim_head = 128,
-                            dropout = 0.0)
-        
-        self.attn_f = Attention(dim = args.s_shapes[0][1],
-                            heads = 2,
-                            dim_head = 128,
-                            dropout = 0.0)
-        
-        self.up = torch.nn.Upsample(size=(args.t_shapes[0][2], args.t_shapes[0][3]), 
-                                        mode='bilinear', 
-                                        align_corners=False)
-        
-        self.ff_ts = nn_bn_relu(args.s_shapes[0][1], 256)
-        self.ff_tt = nn_bn_relu(args.t_shapes[0][1], 256)
+class Interpolate(nn.ModuleList):
+    def __init__(self, out_shape, mode="nearest"):
+        super(Interpolate, self).__init__()
+        self.out_shape = out_shape
+        self.mode = mode
+    def forward(self, x):
+        x = torch.nn.functional.interpolate(x, self.out_shape, mode=self.mode)
+        return x
 
-        self.ff_fs = nn_bn_relu(args.s_shapes[0][1], 256)
-        self.ff_ft = nn_bn_relu(args.t_shapes[0][1], 256)
+def build_feature_connector_complex(s_channel, output_channel, out_shape):
+    # mid_channel = np.min([128, s_channel // 2])
+    C = [
+        Interpolate(out_shape),
+        nn.Conv2d(s_channel, output_channel, kernel_size=3, stride=1, padding=1, bias=False),
+    ]
+    for m in C:
+        if isinstance(m, nn.Conv2d):
+            n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+            m.weight.data.normal_(0, math.sqrt(2. / n))
+        elif isinstance(m, nn.BatchNorm2d):
+            m.weight.data.fill_(1)
+            m.bias.data.zero_()
 
-    def kullback_leibler_loss(self, student_outputs, teacher_outputs, T=1.0, alpha=0.5):
-        """
-        Calculate the knowledge distillation loss using KL divergence.
-        :param student_outputs: Outputs of the student model
-        :param teacher_outputs: Outputs of the teacher model
-        :param T: Temperature parameter (default: 1.0)
-        :param alpha: Weight of the KL divergence term (default: 0.5)
-        """
+    return nn.Sequential(*C)
+
+class LinearTransformStudent(nn.Module):
+    def __init__(self, s_shapes, t_shapes):
+        super(LinearTransformStudent, self).__init__()
+
+        # check lại chỗ này khi dùng toàn bộ layer của student
+        self.feature_projection = nn.ModuleList([build_feature_connector_complex(s_shape[1], # student_channel
+                                                                                t_shape[1], # teacher_channle
+                                                                                (t_shape[2], t_shape[3])) # teacher H, teacher W
+                                                                                for s_shape, t_shape in zip(s_shapes, t_shapes)])
+
+    def forward(self, g_s):
+        g_s = [operation(g_s[i]) for i, operation in enumerate(self.feature_projection)]
+        return g_s
+
+
+class MSELoss(nn.Module):
+    def __init__(self, dim):
+        super(MSELoss, self).__init__()
+        self.attn_t = Attention(dim = dim,
+                            heads = 2,
+                            dim_head = 32,
+                            dropout = 0.0).cuda()
         
-        kd_loss = nn.KLDivLoss()(nn.functional.log_softmax(student_outputs / T, dim=1),
-                                nn.functional.softmax(teacher_outputs / T, dim=1)) * (alpha * T * T)
-        return kd_loss
-    
-    def forward(self, g_s, g_t):
-        # hardcode get the first layer in student and teacher
-        student_feature = g_s[0]
-        student_feature = self.up(student_feature)
+        self.attn_f = Attention(dim = dim,
+                            heads = 2,
+                            dim_head = 32,
+                            dropout = 0.0).cuda()
+        
+    def forward(self, student_feature, teacher_feature):
         b, c, t, f = student_feature.size()
-        student_feature = student_feature.permute(0, 3, 2, 1).contiguous().view(b*f, t, c)
-        student_feature = self.attn_t(student_feature)
-    
-        student_feature_ff = self.ff_ts(student_feature, relu=False)
-        teacher_features_ff = self.ff_tt(g_t[0][0], relu=False)
-        # loss_t = self.kullback_leibler_loss(student_feature_ff, teacher_features_ff)
-        loss_t = F.mse_loss(student_feature_ff, teacher_features_ff)
+        student_feature_t = student_feature.permute(0, 3, 2, 1).contiguous().view(b*f, t, c)
+        student_feature_t = self.attn_t(student_feature_t)
+        student_feature_t = student_feature_t.view(b, f, t, c).permute(0, 3, 2, 1)
+        loss_t = F.mse_loss(student_feature_t, teacher_feature)
 
-        student_feature = student_feature.view(b, f, t, c).permute(0, 2, 1, 3).contiguous().view(b*t, f, c)
-        student_feature = self.attn_f(student_feature)
-
-        student_feature_ff = self.ff_fs(student_feature, relu=False)
-        teacher_features_ff = self.ff_ft(g_t[0][1], relu=False)
-        # loss_f = self.kullback_leibler_loss(student_feature_ff, teacher_features_ff)
-        loss_f = F.mse_loss(student_feature_ff, teacher_features_ff)
-
+        student_feature_f = student_feature.permute(0, 2, 3, 1).contiguous().view(b*t, f, c)
+        student_feature_f = self.attn_f(student_feature_f)
+        student_feature_f = student_feature_f.view(b, t, f, c).permute(0, 3, 1, 2)
+        loss_f = F.mse_loss(student_feature_f, teacher_feature)
+        
         return loss_t + loss_f
+
+class AKD(nn.Module):
+    def __init__(self, s_shapes, t_shapes):
+        super(AKD, self).__init__()
+        self.linear_trans_s = LinearTransformStudent(s_shapes, t_shapes)  # Ensure this class is defined
+        self.mse_loss = [MSELoss(t_shape[1]) for t_shape in t_shapes]
+    
+    def forward(self, student_feats, teacher_feats):
+        student_feats_transform = self.linear_trans_s(student_feats)  # Transform student features
+        loss = self.mse_loss[0](student_feats_transform[-1], teacher_feats[-1])
+        # for i in range(len(self.mse_loss)):
+        #     loss = self.mse_loss[i](student_feats_transform[-1], teacher_feats[-1])
+        
+        return loss

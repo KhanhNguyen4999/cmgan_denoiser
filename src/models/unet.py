@@ -136,6 +136,57 @@ class ComplexDecoder(nn.Module):
         x = self.conv(x)
         return x
 
+
+class UNet16(nn.Module):
+    def __init__(self, n_channels, bilinear=False):
+        super(UNet16, self).__init__()
+        self.n_channels = n_channels
+        self.bilinear = bilinear
+
+        self.inc = (DoubleConv(n_channels, 16))
+        self.down1 = (Down(16, 32))
+        self.down2 = (Down(32, 64))
+        self.down3 = (Down(64, 128))
+        factor = 2 if bilinear else 1
+        self.down4 = (Down(128, 256 // factor))
+        self.up1 = (Up(256, 128 // factor, bilinear))
+        self.up2 = (Up(128, 64 // factor, bilinear))
+        self.up3 = (Up(64, 32 // factor, bilinear))
+        self.up4 = (Up(32, 16, bilinear))
+
+        self.mask_decoder = MaskDecoder(201, num_channel=16, out_channel=1)
+        self.complex_decoder = ComplexDecoder(num_channel=16)
+
+    def forward(self, mix):
+        '''
+        mix: shape (batch_size, channel, width, height)
+        '''
+        mag = torch.sqrt(mix[:, 0, :, :]**2 + mix[:, 1, :, :]**2).unsqueeze(1)
+        noisy_phase = torch.angle(torch.complex(mix[:, 0, :, :], mix[:, 1, :, :])).unsqueeze(1)
+        x = torch.cat([mag, mix], dim=1)
+
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+
+        # Decoder
+        mask = self.mask_decoder(x)
+        out_mag = mask * mag
+
+        complex_out = self.complex_decoder(x)
+        mag_real = out_mag * torch.cos(noisy_phase)
+        mag_imag = out_mag * torch.sin(noisy_phase)
+        final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
+        final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
+
+        return final_real, final_imag, [x4]
     
 """ Full assembly of the parts to form the complete network """
 class UNet32(nn.Module):
@@ -187,7 +238,7 @@ class UNet32(nn.Module):
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag, [x1, x2, x3, x4]
+        return final_real, final_imag, [x4]
     
 class UNet64(nn.Module):
     def __init__(self, n_channels, bilinear=False):
@@ -238,4 +289,4 @@ class UNet64(nn.Module):
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag, [x1, x2, x3, x4]
+        return final_real, final_imag, [x1, x2, x3,x4]
