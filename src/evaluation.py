@@ -276,6 +276,58 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
           'stoi: ', metrics_avg[5],
           'RTF: ', RTF )
 
+def evaluation_last(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
+    n_fft = 400
+
+    map_location='cuda'
+    package = torch.load(model_path + "/checkpoint.tar", map_location = map_location)
+    
+    model = UNet16(n_channels=3, bilinear=True)
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        model.module.load_state_dict(package['model'])
+    else:
+        model.load_state_dict(package['model'])
+
+    #model = generator.TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
+    model.eval()
+    model = model.cuda()
+
+    if not os.path.exists(saved_dir):
+        os.mkdir(saved_dir)
+
+    audio_list = os.listdir(noisy_dir)
+    audio_list = natsorted(audio_list)
+
+    ls_est_audio = Parallel(n_jobs=1, prefer="threads")(
+                delayed(enhance_one_track)(model,
+                                            os.path.join(noisy_dir, audio),
+                                            saved_dir,
+                                            16000*10,
+                                            n_fft,
+                                            n_fft//4,
+                                            save_tracks
+                                            ) for audio in audio_list)
+
+    RTF = np.mean([e[2] for e in ls_est_audio])
+
+    sr = 16000
+    metrics = Parallel(n_jobs=10)(
+        delayed(compute_metrics)(sf.read(os.path.join(clean_dir, audio_list[i]))[0],
+                                ls_est_audio[i][0],
+                                sr,
+                                0) for i in range(len(ls_est_audio))
+    )
+
+    metrics_avg = np.mean(metrics, 0)
+
+    print('pesq: ', metrics_avg[0],
+          'csig: ', metrics_avg[1],
+          'cbak: ', metrics_avg[2],
+          'covl: ', metrics_avg[3],
+          'ssnr: ', metrics_avg[4],
+          'stoi: ', metrics_avg[5],
+          'RTF: ', RTF )
+
 def eval_best_loss(checkpoint_path):
     package = torch.load(checkpoint_path, map_location = "cpu")
  

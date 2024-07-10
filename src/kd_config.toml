@@ -1,5 +1,5 @@
 [main]
-name = "CMGAN_unet_16_bilinear_discriminator_remix"
+name = "CMGAN_unet_16_bilinear_discriminator_FAKD_cosine_0.1"
 seed = 0
 epochs = 100
 cut_len = 32000
@@ -22,7 +22,7 @@ num_prints = 5
 
 # augmentation method
 [main.augment]
-remix = true
+remix = false
 remix_snr = false
 
 # You can experiment on different weights for final loss combination
@@ -35,7 +35,9 @@ gan =  0.05
 [main.criterion]
 KDLoss = false  # kd_logit
 AFDLoss = false
-kd_weight = []
+AKD = false
+FAKD = true
+kd_weight = [0.1]
 
 # Config model
 [model]
@@ -52,8 +54,8 @@ ndf = 16
 [dataset_train]
 path = "/root/khanhnnm/se/VCTK/train"
 [dataset_train.dataloader]
-batchsize = 16
-n_worker = 4
+batchsize = 8
+n_worker = 2
 pin_memory = true
 
 [dataset_train.sampler]
@@ -64,8 +66,8 @@ drop_last = true
 path = "/root/khanhnnm/se/VCTK/test"
     
 [dataset_valid.dataloader]
-batchsize = 16
-n_worker = 4
+batchsize = 8
+n_worker = 2
 
 [dataset_valid.sampler]
 shuffle = true
@@ -83,4 +85,4 @@ decay_epoch = 20
 gamma = 0.5
 
 [trainer]
-path = "trainer.kd_trainer_final_discriminator.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast
+path = "trainer.kd_trainer_final_discriminator_duplicate.KDTrainer"   # Change dataloader to dataloader_2 when using trainer_fast

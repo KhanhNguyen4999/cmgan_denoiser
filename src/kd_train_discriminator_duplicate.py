@@ -9,6 +9,7 @@ from utils import *
 from models.unet import UNet16, UNet32, UNet64
 from models.generator import TSCNet
 from models import discriminator
+from models.distiller import Distiller
 from time import gmtime, strftime
 from data import dataloader2
 import torch.distributed as dist
@@ -16,8 +17,8 @@ from torch.nn.parallel import DistributedDataParallel
 from torchinfo import summary
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
-from tools import KDLoss, PearsonCorrelation, AFD
-# from tools.AFD_kullback_leiber import AFD
+from tools import KDLoss, PearsonCorrelation
+from tools.AFD_kullback_leiber import AFD
 
 warnings.filterwarnings('ignore')
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
@@ -31,9 +32,10 @@ def cleanup():
 def setup(rank, world_size):
     torch.cuda.set_device(rank)
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ['MASTER_PORT'] = '29501'
+    os.environ['NCCL_BLOCKING_WAIT'] = '0'  # not to enforce timeout
     torch.distributed.init_process_group(
-        backend="gloo",
+        backend="nccl",
         world_size=world_size,
         rank=rank)
 
@@ -46,7 +48,22 @@ def load_state_dict_from_checkpoint(checkpoint_path):
         new_state_dict[name] = v
     return new_state_dict
 
-def entry(rank, world_size, config, args):
+def load_student_model(model_type, n_channels):
+    if model_type == 'Unet16':
+        model = UNet16(n_channels=n_channels, bilinear=True)
+    elif model_type == 'Unet32':
+        model = UNet32(n_channels=n_channels, bilinear=True)
+    else:
+        model = UNet64(n_channels=n_channels, bilinear=True)
+    return model
+
+def load_teacher_model(checkpoint_path, n_fft):
+    state_dict = load_state_dict_from_checkpoint(checkpoint_path)
+    teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
+    teacher_model.load_state_dict(state_dict)
+    return teacher_model
+
+def entry(rank, world_size, config):
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     setup(rank, world_size)
     if rank == 0:
@@ -71,7 +88,6 @@ def entry(rank, world_size, config, args):
     n_fft = config["feature"]["n_fft"]
     hop = config["feature"]["hop"]
     cut_len = int(config["main"]["cut_len"])
-    student_model = config["main"]["student_model"]
     save_model_dir = os.path.join(config["main"]["save_model_dir"], config["main"]['name'] + '/checkpoints')
 
     if rank == 0:
@@ -85,7 +101,6 @@ def entry(rank, world_size, config, args):
 
     log_dir = save_model_dir
     logger = get_logger(log_dir=log_dir, log_name="train.log", resume=resume, is_rank0=rank==0)
-    logger.info(f"Argument: {args}")
 
     # Create train dataloader
     train_ds, test_ds = dataloader2.load_data(    
@@ -100,35 +115,32 @@ def entry(rank, world_size, config, args):
 
     logger.info(f"Total iteration through trainset: {len(train_ds)}")
     logger.info(f"Total iteration through testset: {len(test_ds)}")
-
-    # ----- Load student model and teacher model
-    if student_model == 'Unet16':
-        model = UNet16(n_channels=num_channel, bilinear=True)
-    elif student_model == 'Unet32':
-        model = UNet32(n_channels=num_channel, bilinear=True)
-    else:
-        model = UNet64(n_channels=num_channel, bilinear=True)
-
+    forward_teacher = config['main']['criterion']['AKD'] or config['main']['criterion']['AFDLoss'] or config['main']['criterion']['FAKD']
+    
+    model = load_student_model(model_type=config["main"]["student_model"], n_channels=num_channel)
     model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
+
+    teacher_model = load_teacher_model(checkpoint_path=config['main']['teacher_checkpoint'], n_fft=n_fft)
+    teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
     discriminator_model = discriminator.Discriminator(ndf=16).cuda()
     discriminator_model = DistributedDataParallel(discriminator_model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
-    optimizer = torch.optim.AdamW(model.parameters(), 
-                                lr=init_lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=init_lr)
     optimizer_disc = torch.optim.AdamW(discriminator_model.parameters(), lr=2 * init_lr)
+    
+    if forward_teacher:
+        distiller = Distiller(config)
+        distiller = DistributedDataParallel(distiller.to(rank), device_ids=[rank], find_unused_parameters=True)
+        distiller_optimizer = torch.optim.AdamW(distiller.parameters(), lr=init_lr)
+    else:
+        distiller = None
+        distiller_optimizer = None
 
-    #if config['main']['criterion']['AFDLoss']: # need to forward through the teacher backbone to get the feature extractor
-    state_dict = load_state_dict_from_checkpoint(config['main']['teacher_checkpoint'])
-    teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
-    teacher_model.load_state_dict(state_dict)
-    teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
-    #else:
-     #   teacher_model = None
 
     if rank == 0:
         logger.info(f"---------- Summary for student model")
-        summary(model, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
+        summary(model.module, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
 
     # tensorboard writer
     writer = SummaryWriter(os.path.join(save_model_dir, "tsb_log"))
@@ -139,38 +151,15 @@ def entry(rank, world_size, config, args):
     loss_weights.append(config["main"]['loss_weights']["time"])
     loss_weights.append(config["main"]['loss_weights']["gan"])
 
-    # criterion
-    kd_weight = list(config['main']['criterion']['kd_weight'])
-
-    criterion_kd_list = nn.ModuleList([])
-    if config['main']['criterion']['KDLoss']:
-        criterion_kd_list.append(KDLoss(weight_ri=config["main"]['loss_weights']["ri"],
-                                        weight_mag=config["main"]['loss_weights']["mag"],
-                                        weight_time=config["main"]['loss_weights']["time"],
-                                        weight_gan=config["main"]['loss_weights']["gan"]))
-    
-    if config['main']['criterion']['AFDLoss']:
-        # student: layer [x1,x2,x3,x4], teacher: layer [x2, x3, x4, x5]
-        if student_model == 'Unet32':
-            s_shapes = [(batch_size, 32, 321, 210), (batch_size, 64, 160, 100), (batch_size, 128, 80, 50), (batch_size, 256, 40, 25)]
-        else:
-            s_shapes = [(batch_size, 64, 321, 210), (batch_size, 128, 160, 100), (batch_size, 256, 80, 50), (batch_size, 512, 40, 25)]
-
-        t_shapes = [(batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101), (batch_size, 64, 321, 101)]
-        criterion_kd_list.append(AFD(s_shapes=s_shapes, t_shapes=t_shapes))
-
-    criterion_kd_list = criterion_kd_list.cuda()
-    
-    if len(criterion_kd_list) == 0 or (len(criterion_kd_list) == 1 and isinstance(criterion_kd_list[0], KDLoss)):
-        kd_optimizer = None
-    else:
-        kd_optimizer = torch.optim.AdamW(criterion_kd_list.parameters(), lr=init_lr)
-
     trainer_class = initialize_module(config["trainer"]["path"], initialize=False)
     # scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
     scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=decay_epoch, gamma=gamma)
-
+    if forward_teacher:
+        scheduler_distiller = torch.optim.lr_scheduler.StepLR(distiller_optimizer, step_size=decay_epoch, gamma=gamma)
+    else:
+        scheduler_distiller = None
+        
     trainer = trainer_class(
         dist = dist,
         rank = rank,
@@ -180,12 +169,19 @@ def entry(rank, world_size, config, args):
         batch_size = batch_size,
         model = model,
         teacher_model = teacher_model,
+        discriminator_model = discriminator_model,
+        distiller = distiller,
         train_ds = train_ds,
         test_ds = test_ds,
+
         scheduler = scheduler,
         scheduler_D = scheduler_D,
+        scheduler_distiller = scheduler_distiller,
+        
         optimizer = optimizer,
-        kd_optimizer = kd_optimizer,
+        distiller_optimizer = distiller_optimizer,
+        discriminator_optimizer = optimizer_disc,
+        
         loss_weights = loss_weights,
         hop = hop,
         n_fft = n_fft,
@@ -199,10 +195,7 @@ def entry(rank, world_size, config, args):
         tsb_writer = writer,
         num_prints = num_prints,
         logger = logger,
-        kd_weight = kd_weight,
-        criterion_kd_list = criterion_kd_list,
-        discriminator_model = discriminator_model,
-        discriminator_optimizer = optimizer_disc
+        forward_teacher = forward_teacher
     )
 
     trainer.train()
@@ -220,23 +213,24 @@ if __name__ == '__main__':
                                         default="/home/minhkhanh/Desktop/work/denoiser/CMGAN/src/config.toml")
 
 
-    args = parser.parse_args()
-    config = toml.load(args.config)
+    argument = parser.parse_args()
+    config = toml.load(argument.config)
 
     available_gpus = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
     print("GPU list:", available_gpus)
-    args.n_gpus = len(available_gpus)
-    print("Number of gpu:", args.n_gpus)
+    argument.n_gpus = len(available_gpus)
+    print("Number of gpu:", argument.n_gpus)
 
     try: 
         mp.spawn(entry,
-                args=(args.n_gpus, config, args),
-                nprocs=args.n_gpus,
+                args=(argument.n_gpus, config),
+                nprocs=argument.n_gpus,
                 join=True)
     except KeyboardInterrupt:
         print('Interrupted')
         try: 
-            dist.destroy_process_group()  
+            cleanup() 
         except KeyboardInterrupt: 
-            os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ")
+            os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ") 
+
     

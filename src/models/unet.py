@@ -186,7 +186,7 @@ class UNet16(nn.Module):
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag, [x4]
+        return final_real, final_imag, [x1, x2, x3, x4]
     
 """ Full assembly of the parts to form the complete network """
 class UNet32(nn.Module):

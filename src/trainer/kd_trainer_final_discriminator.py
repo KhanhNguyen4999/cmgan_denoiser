@@ -10,10 +10,9 @@ from evaluation import evaluation_model
 from tools.compute_metrics import stoi
 from augment import Remix, SNRScale
 from data.dataloader import load_audio
-from tools import AFD
+from tools.AFD_kullback_leiber import AFD
 from tools.AKD import AKD
 import os
-import json
 
 
 class KDTrainer(BaseTrainer):
@@ -27,13 +26,16 @@ class KDTrainer(BaseTrainer):
                 batch_size,
                 model,
                 teacher_model,
+                discriminator_model,
+                distiller,
                 train_ds,
                 test_ds,
                 scheduler,
                 scheduler_D,
-                scheduler_KD,
+                scheduler_distiller,
                 optimizer,
-                kd_optimizer,
+                distiller_optimizer,
+                discriminator_optimizer,
                 loss_weights,
                 hop,
                 n_fft,
@@ -47,10 +49,7 @@ class KDTrainer(BaseTrainer):
                 tsb_writer,
                 num_prints,
                 logger,
-                kd_weight,
-                criterion_kd_list,
-                discriminator_model,
-                discriminator_optimizer
+                forward_teacher
             ):
 
         super(KDTrainer, self).__init__(
@@ -66,17 +65,21 @@ class KDTrainer(BaseTrainer):
                                 save_model_dir
                             )
         
-        self.kd_optimizer = kd_optimizer
+        self.distiller = distiller
+        self.discriminator_model = discriminator_model
         self.teacher_model = teacher_model
-        self.kd_weight = kd_weight
-        self.criterion_kd_list = criterion_kd_list
+
+        self.distiller_optimizer = distiller_optimizer
+        self.discriminator_model_optimizer = discriminator_optimizer
         self.optimizer = optimizer
+        
         self.batch_size = batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
         
         self.scheduler = scheduler
         self.scheduler_D = scheduler_D
-        self.scheduler_KD = scheduler_KD
+        self.scheduler_distiller = scheduler_distiller
+
 
         self.loss_weights = loss_weights
         self.tsb_writer = tsb_writer
@@ -93,10 +96,7 @@ class KDTrainer(BaseTrainer):
         self.num_prints = num_prints
         self.logger = logger
         self.model_type = "unet"
-
-        self.discriminator_model = discriminator_model
-        self.discriminator_model_optimizer = discriminator_optimizer
-
+        self.forward_teacher = forward_teacher
         # data augment
         self.remix = remix
         self.remix_snr = remix_snr
@@ -130,15 +130,24 @@ class KDTrainer(BaseTrainer):
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             package["model"] = self.model.module.state_dict()
             package["disc_model"] = self.discriminator_model.module.state_dict()
+            if self.forward_teacher:
+                package["distiller"] = self.distiller.module.state_dict()
         else:
             package["model"] = self.model.state_dict()
+            package["disc_model"] = self.discriminator_model.state_dict()
+            if self.forward_teacher:
+                package["distiller"] = self.distiller.state_dict()
         
         if isinstance(self.optimizer, ZeroRedundancyOptimizer):
             package['optimizer'] = self.optimizer.consolidate_state_dict()
             package["disc_optimizer"] = self.discriminator_model_optimizer.consolidate_state_dict()
+            if self.forward_teacher:
+                package["distiller_optimizer"] = self.distiller_optimizer.consolidate_state_dict()
         else:
             package['optimizer'] = self.optimizer.state_dict()
             package["disc_optimizer"] = self.discriminator_model_optimizer.state_dict()
+            if self.forward_teacher:
+                package["distiller_optimizer"] = self.distiller_optimizer.state_dict()
         
         package['best_state'] = self.best_state
         package['loss'] = self.best_loss
@@ -176,13 +185,19 @@ class KDTrainer(BaseTrainer):
             if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
                 self.model.module.load_state_dict(package['model'])
                 self.discriminator_model.module.load_state_dict(package['disc_model'])
+                if self.forward_teacher:
+                    self.distiller.module.load_state_dict(package['distiller'])
             else:
                 self.model.load_state_dict(package['model'])
                 self.discriminator_model.load_state_dict(package(['disc_model']))
+                if self.forward_teacher:
+                    self.distiller.load_state_dict(package(['distiller']))
 
                 
             self.optimizer.load_state_dict(package['optimizer'])
             self.discriminator_model_optimizer.load_state_dict(package['disc_optimizer'])
+            if self.forward_teacher:
+                self.distiller_optimizer.load_state_dict(package['distiller_optimizer'])
 
             self.epoch_start = package['epoch'] + 1
             self.best_loss = package['loss']
@@ -257,17 +272,6 @@ class KDTrainer(BaseTrainer):
         )
         return loss   
     
-    def calculate_kd_loss(self, student_generator_outputs, teacher_generator_outputs):
-        loss = torch.zeros(1, requires_grad=True).cuda()
-        for criterion, weight in zip(self.criterion_kd_list, self.kd_weight):            
-            if isinstance(criterion, AFD) or isinstance(criterion, AKD):
-                loss += criterion(student_generator_outputs['features'], teacher_generator_outputs['features']) * weight
-            else:
-                loss += criterion(student_generator_outputs, teacher_generator_outputs) * weight
-
-        
-        return loss
-    
     def calculate_discriminator_loss(self, generator_outputs):
 
         length = generator_outputs["est_audio"].size(-1)
@@ -313,18 +317,18 @@ class KDTrainer(BaseTrainer):
         teacher_pesq_label = teacher_pesq_label.type(torch.float32)
 
         teacher_enhance = batch[2].cuda()
+        # Normalization
+        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
+        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
+        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
 
         if self.remix:
             sources = torch.stack([noisy - clean, clean])
             sources = self.augment(sources)
             noise, clean = sources
             noisy = noise + clean
-
-        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
-        noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
         
-        if any([isinstance(x, AFD) or isinstance(x, AKD) for x in self.criterion_kd_list]):
+        if self.forward_teacher:
             teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
         else:
             teacher_enhance = torch.transpose(teacher_enhance, 0, 1)
@@ -342,7 +346,10 @@ class KDTrainer(BaseTrainer):
         student_generator_outputs["noisy"] = noisy
         student_generator_outputs["one_labels"] = one_labels
         se_loss = self.calculate_se_loss(student_generator_outputs)
-        kd_loss = self.calculate_kd_loss(student_generator_outputs, teacher_generator_outputs)
+        if self.forward_teacher:
+            kd_loss = self.distiller(student_generator_outputs, teacher_generator_outputs)
+        else:
+            kd_loss = torch.tensor(0.0)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert se_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {se_loss.dtype}"
@@ -354,9 +361,9 @@ class KDTrainer(BaseTrainer):
         self.optimizer.step()
         self.optimizer.zero_grad()
 
-        if self.kd_optimizer is not None:
-            self.kd_optimizer.step()
-            self.kd_optimizer.zero_grad()
+        if self.forward_teacher:
+            self.distiller_optimizer.step()
+            self.distiller_optimizer.zero_grad()
 
         # Train Discriminator
         student_generator_outputs['pesq_label'] = teacher_pesq_label
@@ -459,8 +466,8 @@ class KDTrainer(BaseTrainer):
         self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
         self.scheduler.step()
         self.scheduler_D.step()
-        if self.scheduler_KD is not None:
-            self.scheduler_KD.step()
+        if self.scheduler_distiller is not None:
+            self.scheduler_distiller.step()
 
 
     @torch.no_grad()

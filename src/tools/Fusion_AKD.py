@@ -48,18 +48,6 @@ class SelfAttention(nn.Module):
         
         return context
 
-class nn_bn_relu(nn.Module):
-    def __init__(self, nin, nout):
-        super(nn_bn_relu, self).__init__()
-        self.linear = nn.Linear(nin, nout)
-        self.bn = nn.BatchNorm1d(nout)
-        self.relu = nn.ReLU(False)
-
-    def forward(self, x, relu=True):
-        if relu:
-            return self.relu(self.bn(self.linear(x)))
-        return self.linear(x)
-
 class Interpolate(nn.ModuleList):
     def __init__(self, out_shape, mode="nearest"):
         super(Interpolate, self).__init__()
@@ -127,34 +115,6 @@ def cosine_pairwise_similarities(A, B=None, eps=1e-6, normalized=True):
 
     return similarities
 
-
-# class MSELoss(nn.Module):
-#     def __init__(self, dim):
-#         super(MSELoss, self).__init__()
-#         self.attn_t = Attention(dim = dim,
-#                             heads = 2,
-#                             dim_head = 32,
-#                             dropout = 0.0).cuda()
-        
-#         self.attn_f = Attention(dim = dim,
-#                             heads = 2,
-#                             dim_head = 32,
-#                             dropout = 0.0).cuda()
-        
-#     def forward(self, student_feature, teacher_feature):
-#         b, c, t, f = student_feature.size()
-#         student_feature_t = student_feature.permute(0, 3, 2, 1).contiguous().view(b*f, t, c)
-#         student_feature_t = self.attn_t(student_feature_t)
-#         student_feature_t = student_feature_t.view(b, f, t, c).permute(0, 3, 2, 1)
-#         loss_t = F.mse_loss(student_feature_t, teacher_feature)
-
-#         student_feature_f = student_feature.permute(0, 2, 3, 1).contiguous().view(b*t, f, c)
-#         student_feature_f = self.attn_f(student_feature_f)
-#         student_feature_f = student_feature_f.view(b, t, f, c).permute(0, 3, 1, 2)
-#         loss_f = F.mse_loss(student_feature_f, teacher_feature)
-        
-#         return loss_t + loss_f
-
 class MSELoss(nn.Module):
     def __init__(self, dim):
         super(MSELoss, self).__init__()
@@ -167,7 +127,10 @@ class MSELoss(nn.Module):
                             heads = 2,
                             dim_head = 32,
                             dropout = 0.0).cuda()
-        
+    
+    # def forward(self, student_feature, teacher_feature):
+    #     loss = F.mse_loss(student_feature, teacher_feature)
+    #     return loss
     def forward(self, student_feature, teacher_feature):
         b, c, t, f = student_feature.size()
         student_feature_t = student_feature.permute(0, 3, 2, 1).contiguous().view(b*f, t, c)
@@ -193,16 +156,79 @@ class MSELoss(nn.Module):
         
         return torch.mean(loss_t) + torch.mean(loss_f)
 
-class AKD(nn.Module):
+class ABF(nn.Module):
+    def __init__(self, in_channel, mid_channel, out_channel, fuse, H, W):
+        super(ABF, self).__init__()
+        self.shape = (H, W)
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channel, mid_channel, kernel_size=1, bias=False),
+            nn.BatchNorm2d(mid_channel),
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(mid_channel, out_channel, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(out_channel),
+        )
+        if fuse:
+            self.att_conv = nn.Sequential(
+                    nn.Conv2d(mid_channel*2, 2, kernel_size=1),
+                    nn.Sigmoid(), # có nên đổi thành relu không
+                )
+        else:
+            self.att_conv = None
+        nn.init.kaiming_uniform_(self.conv1[0].weight, a=1)  # pyre-ignore
+        nn.init.kaiming_uniform_(self.conv2[0].weight, a=1)  # pyre-ignore
+
+    def forward(self, x, y=None):
+        '''
+            x: current student layer feature
+            y: residual feature
+        '''
+        # upsample student feature
+        x = F.interpolate(x, self.shape, mode="nearest") # or do upsampling
+        n,_,h,w = x.shape
+        x = self.conv1(x)
+        if self.att_conv is not None:
+            # fusion student feature and residual feature
+            z = torch.cat([x, y], dim=1)
+            z = self.att_conv(z)
+            x = (x * z[:,0].view(n,1,h,w) + y * z[:,1].view(n,1,h,w))
+        # output 
+        y = self.conv2(x)
+        return y, x
+
+class FAKD(nn.Module):
     def __init__(self, s_shapes, t_shapes):
-        super(AKD, self).__init__()
+        super(FAKD, self).__init__()
         self.linear_trans_s = LinearTransformStudent(s_shapes, t_shapes)  # Ensure this class is defined
         self.mse_loss = [MSELoss(t_shape[1]) for t_shape in t_shapes]
+        self.n_layer = len(s_shapes)
+
+        self.ABF_blocks = [ABF(
+                                in_channel = s_shape[1], 
+                                mid_channel = t_shape[1], 
+                                out_channel = t_shape[1],
+                                fuse = i!=self.n_layer-1,
+                                H = t_shape[2],
+                                W = t_shape[3]
+                            ).cuda() 
+                            for i, (s_shape, t_shape) in enumerate(zip(s_shapes, t_shapes))]
+
+    def fusion_loss(self, student_layer, teacher_layer, n=0):
+        if n == self.n_layer - 1:
+            fusion_feature, _ = self.ABF_blocks[n](student_layer[n])
+            loss = self.mse_loss[n](fusion_feature, teacher_layer[n])
+            return loss, fusion_feature
+        
+        loss, residual_feature = self.fusion_loss(student_layer, teacher_layer, n+1)
+        curr_fusion_features, _ = self.ABF_blocks[n](student_layer[n], residual_feature) 
+        curr_loss = self.mse_loss[n](curr_fusion_features, teacher_layer[n])
+        return loss + curr_loss,  curr_fusion_features
     
     def forward(self, student_feats, teacher_feats):
-        student_feats_transform = self.linear_trans_s(student_feats)  # Transform student features
-        # loss = self.mse_loss[0](student_feats_transform[-1], teacher_feats[-1])
-        for i in range(len(self.mse_loss)):
-            loss = self.mse_loss[i](student_feats_transform[-1], teacher_feats[-1])
-        
+        # Calculate in the frequency site first
+        loss, _ = self.fusion_loss(student_feats, teacher_feats)
         return loss
+
+
+
+    

@@ -65,31 +65,56 @@ class ProbLoss(nn.Module):
     def __init__(self):
         super(ProbLoss, self).__init__()
     
-    def forward(self, student_f, teacher_f, epsilon=1e-6):
-        bs, channel, t, f = teacher_f.size()
-        # Permute to (batch_size, time, frequency, channels)
-        student_f_time = student_f.permute(0, 3, 2, 1)
-        teacher_f_time = teacher_f.permute(0, 3, 2, 1)
-        # Reshape to (batch_size, time, channels * frequency)
-        student_f_time = student_f_time.contiguous().view(bs * f, t, -1)
-        teacher_f_time = teacher_f_time.contiguous().view(bs * f, t, -1)
-        student_s1 = cosine_pairwise_similarities(student_f_time, normalized=True) # normalize to avoid the negative value, it would lead the nan value in log function
-        teacher_s1 = cosine_pairwise_similarities(teacher_f_time, normalized=True)
-
-         # Transform them into probabilities
-        # student_s1 = student_s1 / torch.sum(student_s1, dim=1, keepdim=True)
-        # teacher_s1 = teacher_s1 / torch.sum(teacher_s1, dim=1, keepdim=True)
+    def forward(self, student_feature, teacher_feature, epsilon=1e-6):
+        b, c, t, f = student_feature.size()
+        student_feature_t = student_feature.permute(0, 3, 2, 1).contiguous().view(b*f, t, c)
+        teacher_feature_t = teacher_feature.permute(0, 3, 2, 1).contiguous().view(b*f, t, c)
+        student_s1 = cosine_pairwise_similarities(student_feature_t, normalized=True) # normalize to avoid the negative value, it would lead the nan value in log function
+        teacher_s1 = cosine_pairwise_similarities(teacher_feature_t, normalized=True)
         student_s1 = F.softmax(student_s1, dim=2)
         teacher_s1 = F.softmax(teacher_s1, dim=2)
+        loss_t = (teacher_s1 - student_s1) * (torch.log(teacher_s1) - torch.log(student_s1))
+        loss_t = loss_t.sum(dim=1).sum(dim=1)
 
-        # print("--student: ", student_s1)
-        # print("--teacher: ", teacher_s1)
-        # Jeffrey's  combined
+        student_feature_f = student_feature.permute(0, 2, 3, 1).contiguous().view(b*t, f, c)
+        teacher_feature_f = teacher_feature.permute(0, 2, 3, 1).contiguous().view(b*t, f, c)
+        student_s2 = cosine_pairwise_similarities(student_feature_f, normalized=True) # normalize to avoid the negative value, it would lead the nan value in log function
+        teacher_s2 = cosine_pairwise_similarities(teacher_feature_f, normalized=True)
+        student_s2 = F.softmax(student_s2, dim=2)
+        teacher_s2 = F.softmax(teacher_s2, dim=2)
+        loss_f = (teacher_s2 - student_s2) * (torch.log(teacher_s2) - torch.log(student_s2))
+        loss_f = loss_f.sum(dim=1).sum(dim=1)
+
+        # Permute to (batch_size, time, frequency, channels)
+        # student_f_time = student_f.permute(0, 3, 2, 1)
+        # teacher_f_time = teacher_f.permute(0, 3, 2, 1)
+        # # Reshape to (batch_size, time, channels * frequency)
+        # student_f_time = student_f_time.contiguous().view(bs * f, t, -1)
+        # teacher_f_time = teacher_f_time.contiguous().view(bs * f, t, -1)
+        # # print(student_f_time[0][0]) 
+        # # print(student_f_time[0][1])
+
+        # student_s1 = cosine_pairwise_similarities(student_f_time, normalized=True) # normalize to avoid the negative value, it would lead the nan value in log function
+        # teacher_s1 = cosine_pairwise_similarities(teacher_f_time, normalized=True)
+
+        # # print(student_s1[0][0].shape)
+        # # print(teacher_s1[0][0])
+        #  # Transform them into probabilities
+        # # student_s1 = student_s1 / torch.sum(student_s1, dim=1, keepdim=True)
+        # # teacher_s1 = teacher_s1 / torch.sum(teacher_s1, dim=1, keepdim=True)
+        # student_s1 = F.softmax(student_s1, dim=2)
+        # teacher_s1 = F.softmax(teacher_s1, dim=2)
+
+        # # print("--student: ", student_s1[0][0].shape)
+        # # print("--teacher: ", teacher_s1[0][0])
+        # # Jeffrey's  combined
         
-        loss = (teacher_s1 - student_s1) * (torch.log(teacher_s1) - torch.log(student_s1))
-
-        print("---Loss: ", torch.mean(loss))
-        return torch.mean(loss)
+        # loss = (teacher_s1 - student_s1) * (torch.log(teacher_s1) - torch.log(student_s1))
+        # # # loss = (teacher_s1 - student_s1)
+        # # print(loss[0].shape)
+        # # print("loss shape: ", loss.shape)
+        # loss = loss.sum(dim=1).sum(dim=1)
+        return torch.mean(loss_t) + torch.mean(loss_f)
 
 class Interpolate(nn.ModuleList):
     def __init__(self, out_shape, mode="nearest"):

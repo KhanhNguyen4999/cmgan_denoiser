@@ -153,7 +153,7 @@ def load_data(ds_dir, batch_size, n_cpu, rank, cut_len, world_size, shuffle):
     torchaudio.set_audio_backend("sox_io")         # in linux
 
     ds_dir = "/".join(ds_dir.split("/")[:-1])
-    train_dir = os.path.join(ds_dir, 'train')
+    train_dir = os.path.join(ds_dir, 'mini_train')
     test_dir = os.path.join(ds_dir, 'test')
 
     train_ds = DemandDataset(train_dir, cut_len)
