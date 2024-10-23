@@ -32,6 +32,7 @@ class AFD(nn.Module):
         for i, (student_f, teacher_f, weight) in enumerate(zip(student_feats_transform, teacher_feats, layer_weights)):
             loss += weight * self.channel_diff[i](student_f, teacher_f)  # Compute weighted loss
 
+        # print(loss)
         return loss
 
 class DiffByChannel(nn.Module):
@@ -47,7 +48,7 @@ class DiffByChannel(nn.Module):
 
         diff = (teacher_f - student_f).pow(2).mean(2)
         diff = torch.mul(diff, F.softmax(self.weight, dim=0)).sum(1)
-        return torch.mean(diff)
+        return torch.sum(diff)
 
 class Interpolate(nn.ModuleList):
     def __init__(self, out_shape, mode="nearest"):
@@ -57,6 +58,7 @@ class Interpolate(nn.ModuleList):
     def forward(self, x):
         x = torch.nn.functional.interpolate(x, self.out_shape, mode=self.mode)
         return x
+    
 class SelfAttention(nn.ModuleList):
     def __init__(self, input_channel):
         super(SelfAttention, self).__init__()

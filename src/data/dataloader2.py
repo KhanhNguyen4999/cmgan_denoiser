@@ -24,7 +24,144 @@ def load_audio(audio_path, offset, num_frames):
                                 num_frames=num_frames)
     return out
 
+# Deprecated - tính dùng để teacher + auxiliary teacher training cho student model
+class DemandDataset2(torch.utils.data.Dataset):
+    def __init__(self, data_dir, cut_len=16000*2):
+        self.cut_len = cut_len
+        self.clean_dir = os.path.join(data_dir, 'clean')
+        self.noisy_dir = os.path.join(data_dir, 'noisy')
+        self.teacher_enhance_dir = os.path.join(data_dir, 'enhance')
+        self.auxiliary_teacher_enhance_dir = os.path.join(data_dir, 'auxiliary_enhance')
+
+        self.clean_wav_name = os.listdir(self.clean_dir)
+        self.clean_wav_name = natsorted(self.clean_wav_name)
+
+        wav_2_pesq = {}
+        with open(f"{data_dir}/pesq_label.txt") as reader:
+            for line in reader.readlines():
+                audio_name, pesq = line.split(" ")
+                wav_2_pesq[audio_name] = float(pesq.strip()) 
+        self.wav_2_pesq = wav_2_pesq
+
+    def __len__(self):
+        return len(self.clean_wav_name)
+
+    def __getitem__(self, idx):
+        clean_file = os.path.join(self.clean_dir, self.clean_wav_name[idx])
+        noisy_file = os.path.join(self.noisy_dir, self.clean_wav_name[idx])
+        enhance_file = os.path.join(self.teacher_enhance_dir, self.clean_wav_name[idx])
+        auxiliary_enhance_file = os.path.join(self.auxiliary_teacher_enhance_dir, self.clean_wav_name[idx])
+
+        pesq = self.wav_2_pesq[self.clean_wav_name[idx]]
+        clean_ds, _ = torchaudio.load(clean_file)
+        noisy_ds, _ = torchaudio.load(noisy_file)
+        enhance_ds, _ = torchaudio.load(enhance_file)
+        auxiliary_enhance_ds, _ = torchaudio.load(auxiliary_enhance_file)
+
+        clean_ds = clean_ds.squeeze()
+        noisy_ds = noisy_ds.squeeze()
+        enhance_ds = enhance_ds.squeeze()
+        auxiliary_enhance_ds = auxiliary_enhance_ds.squeeze()
+
+        length = len(clean_ds)
+        assert length == len(noisy_ds)
+        if length < self.cut_len:
+            units = self.cut_len // length
+            clean_ds_final = []
+            noisy_ds_final = []
+            enhance_ds_final = []
+            auxiliary_enhance_ds_final = []
+            for i in range(units):
+                clean_ds_final.append(clean_ds)
+                noisy_ds_final.append(noisy_ds)
+                enhance_ds_final.append(enhance_ds)
+                auxiliary_enhance_ds_final.append(auxiliary_enhance_ds)
+
+            clean_ds_final.append(clean_ds[: self.cut_len%length])
+            noisy_ds_final.append(noisy_ds[: self.cut_len%length])
+            enhance_ds_final.append(enhance_ds[: self.cut_len%length])
+            auxiliary_enhance_ds_final.append(auxiliary_enhance_ds[: self.cut_len%length])
+
+
+            clean_ds = torch.cat(clean_ds_final, dim=-1)
+            noisy_ds = torch.cat(noisy_ds_final, dim=-1)
+            enhance_ds = torch.cat(enhance_ds_final, dim=-1)
+            auxiliary_enhance_ds = torch.cat(auxiliary_enhance_ds_final, dim=-1)
+
+        else:
+            # randomly cut 2 seconds segment
+            wav_start = random.randint(0, length - self.cut_len)
+            noisy_ds = noisy_ds[wav_start:wav_start + self.cut_len]
+            clean_ds = clean_ds[wav_start:wav_start + self.cut_len]
+            enhance_ds = enhance_ds[wav_start:wav_start + self.cut_len]
+            auxiliary_enhance_ds = auxiliary_enhance_ds[wav_start:wav_start + self.cut_len]
+
+        return clean_ds, noisy_ds, enhance_ds, auxiliary_enhance_ds, length, pesq
+    
 class DemandDataset(torch.utils.data.Dataset):
+    def __init__(self, data_dir, cut_len=16000*2):
+        self.cut_len = cut_len
+        self.clean_dir = os.path.join(data_dir, 'clean')
+        self.noisy_dir = os.path.join(data_dir, 'noisy')
+        self.teacher_enhance_dir = os.path.join(data_dir, 'auxiliary_enhance')
+
+        self.clean_wav_name = os.listdir(self.clean_dir)
+        self.clean_wav_name = natsorted(self.clean_wav_name)
+
+        wav_2_pesq = {}
+        with open(f"{data_dir}/pesq_label.txt") as reader:
+            for line in reader.readlines():
+                audio_name, pesq = line.split(" ")
+                wav_2_pesq[audio_name] = float(pesq.strip()) 
+        self.wav_2_pesq = wav_2_pesq
+
+    def __len__(self):
+        return len(self.clean_wav_name)
+
+    def __getitem__(self, idx):
+        clean_file = os.path.join(self.clean_dir, self.clean_wav_name[idx])
+        noisy_file = os.path.join(self.noisy_dir, self.clean_wav_name[idx])
+        enhance_file = os.path.join(self.teacher_enhance_dir, self.clean_wav_name[idx])
+
+        pesq = self.wav_2_pesq[self.clean_wav_name[idx]]
+        clean_ds, _ = torchaudio.load(clean_file)
+        noisy_ds, _ = torchaudio.load(noisy_file)
+        enhance_ds, _ = torchaudio.load(enhance_file)
+
+        clean_ds = clean_ds.squeeze()
+        noisy_ds = noisy_ds.squeeze()
+        enhance_ds = enhance_ds.squeeze()
+
+        length = len(clean_ds)
+        assert length == len(noisy_ds)
+        if length < self.cut_len:
+            units = self.cut_len // length
+            clean_ds_final = []
+            noisy_ds_final = []
+            enhance_ds_final = []
+            for i in range(units):
+                clean_ds_final.append(clean_ds)
+                noisy_ds_final.append(noisy_ds)
+                enhance_ds_final.append(enhance_ds)
+
+            clean_ds_final.append(clean_ds[: self.cut_len%length])
+            noisy_ds_final.append(noisy_ds[: self.cut_len%length])
+            enhance_ds_final.append(enhance_ds[: self.cut_len%length])
+
+            clean_ds = torch.cat(clean_ds_final, dim=-1)
+            noisy_ds = torch.cat(noisy_ds_final, dim=-1)
+            enhance_ds = torch.cat(enhance_ds_final, dim=-1)
+        else:
+            # randomly cut 2 seconds segment
+            wav_start = random.randint(0, length - self.cut_len)
+            noisy_ds = noisy_ds[wav_start:wav_start + self.cut_len]
+            clean_ds = clean_ds[wav_start:wav_start + self.cut_len]
+            enhance_ds = enhance_ds[wav_start:wav_start + self.cut_len]
+
+        return clean_ds, noisy_ds, enhance_ds, length, pesq
+
+
+class DemandDataset3(torch.utils.data.Dataset):
     def __init__(self, data_dir, cut_len=16000*2):
         self.cut_len = cut_len
         self.clean_dir = os.path.join(data_dir, 'clean')
@@ -85,7 +222,7 @@ class DemandDataset(torch.utils.data.Dataset):
             enhance_ds = enhance_ds[wav_start:wav_start + self.cut_len]
 
         return clean_ds, noisy_ds, enhance_ds, length, pesq
-
+    
 class Audioset:
     def __init__(self, data_dir, cut_len=16000*2):
         """
@@ -153,7 +290,7 @@ def load_data(ds_dir, batch_size, n_cpu, rank, cut_len, world_size, shuffle):
     torchaudio.set_audio_backend("sox_io")         # in linux
 
     ds_dir = "/".join(ds_dir.split("/")[:-1])
-    train_dir = os.path.join(ds_dir, 'mini_train')
+    train_dir = os.path.join(ds_dir, 'train')
     test_dir = os.path.join(ds_dir, 'test')
 
     train_ds = DemandDataset(train_dir, cut_len)

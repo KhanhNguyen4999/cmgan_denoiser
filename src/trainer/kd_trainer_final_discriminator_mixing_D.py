@@ -27,15 +27,22 @@ class KDTrainer(BaseTrainer):
                 model,
                 teacher_model,
                 discriminator_model,
+                snr_mixing_discriminator_model,
+
                 distiller,
                 train_ds,
                 test_ds,
+
                 scheduler,
                 scheduler_D,
                 scheduler_distiller,
+                scheduler_snr_mixing_D,
+
                 optimizer,
                 distiller_optimizer,
                 discriminator_optimizer,
+                snr_mixing_disc_optimizer,
+
                 loss_weights,
                 hop,
                 n_fft,
@@ -68,17 +75,20 @@ class KDTrainer(BaseTrainer):
         self.distiller = distiller
         self.discriminator_model = discriminator_model
         self.teacher_model = teacher_model
+        self.snr_mixing_discriminator_model = snr_mixing_discriminator_model
 
         self.distiller_optimizer = distiller_optimizer
         self.discriminator_model_optimizer = discriminator_optimizer
         self.optimizer = optimizer
-        
+        self.snr_mixing_disc_optimizer = snr_mixing_disc_optimizer
+
         self.batch_size = batch_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
         
         self.scheduler = scheduler
         self.scheduler_D = scheduler_D
         self.scheduler_distiller = scheduler_distiller
+        self.scheduler_snr_mixing_D = scheduler_snr_mixing_D
 
 
         self.loss_weights = loss_weights
@@ -105,7 +115,7 @@ class KDTrainer(BaseTrainer):
             augments.append(Remix())
         
         self.snr_scaler = SNRScale()
-        self.randomize = torch.distributions.uniform.Uniform(0.5, 1)
+        self.randomize = torch.distributions.uniform.Uniform(0, 1)
         self.augment = torch.nn.Sequential(*augments)
 
         if not os.path.exists(self.save_enhanced_dir):
@@ -131,22 +141,26 @@ class KDTrainer(BaseTrainer):
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             package["model"] = self.model.module.state_dict()
             package["disc_model"] = self.discriminator_model.module.state_dict()
+            package["snr_mixing_disc_model"] = self.snr_mixing_discriminator_model.module.state_dict()
             if self.forward_teacher:
                 package["distiller"] = self.distiller.module.state_dict()
         else:
             package["model"] = self.model.state_dict()
             package["disc_model"] = self.discriminator_model.state_dict()
+            package["snr_mixing_disc_model"] = self.snr_mixing_discriminator_model.state_dict()
             if self.forward_teacher:
                 package["distiller"] = self.distiller.state_dict()
         
         if isinstance(self.optimizer, ZeroRedundancyOptimizer):
             package['optimizer'] = self.optimizer.consolidate_state_dict()
             package["disc_optimizer"] = self.discriminator_model_optimizer.consolidate_state_dict()
+            package["snr_mixing_disc_optimizer"] = self.snr_mixing_disc_optimizer.consolidate_state_dict()
             if self.forward_teacher:
                 package["distiller_optimizer"] = self.distiller_optimizer.consolidate_state_dict()
         else:
             package['optimizer'] = self.optimizer.state_dict()
             package["disc_optimizer"] = self.discriminator_model_optimizer.state_dict()
+            package["snr_mixing_disc_optimizer"] = self.snr_mixing_disc_optimizer.state_dict()
             if self.forward_teacher:
                 package["distiller_optimizer"] = self.distiller_optimizer.state_dict()
         
@@ -186,17 +200,20 @@ class KDTrainer(BaseTrainer):
             if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
                 self.model.module.load_state_dict(package['model'])
                 self.discriminator_model.module.load_state_dict(package['disc_model'])
+                self.snr_mixing_discriminator_model.module.load_state_dict(package['snr_mixing_disc_model'])
                 if self.forward_teacher:
                     self.distiller.module.load_state_dict(package['distiller'])
             else:
                 self.model.load_state_dict(package['model'])
                 self.discriminator_model.load_state_dict(package(['disc_model']))
+                self.snr_mixing_discriminator_model.load_state_dict(package['snr_mixing_disc_model'])
                 if self.forward_teacher:
                     self.distiller.load_state_dict(package(['distiller']))
 
                 
             self.optimizer.load_state_dict(package['optimizer'])
             self.discriminator_model_optimizer.load_state_dict(package['disc_optimizer'])
+            self.snr_mixing_disc_optimizer.load_state_dict(package['snr_mixing_disc_optimizer'])
             if self.forward_teacher:
                 self.distiller_optimizer.load_state_dict(package['distiller_optimizer'])
 
@@ -224,9 +241,9 @@ class KDTrainer(BaseTrainer):
         clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
         if type == "teacher":
             with torch.no_grad():
-                est_real, est_imag, features_enc, features_dec = model(noisy_spec)
+                est_real, est_imag, features = model(noisy_spec)
         else:
-            est_real, est_imag, features_enc, features_dec = model(noisy_spec)
+            est_real, est_imag, features = model(noisy_spec)
 
         est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
         est_mag = torch.sqrt(est_real**2 + est_imag**2)
@@ -244,8 +261,7 @@ class KDTrainer(BaseTrainer):
             "clean_imag": clean_imag,
             "clean_mag": clean_mag,
             "est_audio": est_audio,
-            "features_enc": features_enc,
-            "features_dec": features_dec,
+            "features": features
         }
 
     def calculate_se_loss(self, generator_outputs):
@@ -297,6 +313,19 @@ class KDTrainer(BaseTrainer):
         
         return discrim_loss_metric
 
+    def snx_mixing_generator_loss(self, est_mag):
+        predict_mag = self.snr_mixing_discriminator_model(est_mag)
+        return nn.BCELoss()(predict_mag, torch.ones_like(predict_mag))
+
+    def snr_mixing_discriminator_loss(self, teacher_est_mag, student_est_mag):
+        # Example loss function for discriminator
+        teacher_predict_mag = self.snr_mixing_discriminator_model(teacher_est_mag)
+        student_predict_mag = self.snr_mixing_discriminator_model(student_est_mag)
+
+        real_loss = nn.BCELoss()(teacher_predict_mag, torch.ones_like(teacher_predict_mag))
+        fake_loss = nn.BCELoss()(student_predict_mag, torch.zeros_like(student_predict_mag))
+        return real_loss + fake_loss
+    
     def forward_only_teacher_step(self, enhance_audio):
         enhance_spec = torch.view_as_real(torch.stft(enhance_audio, self.n_fft, self.hop, window=torch.hamming_window(self.n_fft).cuda(), onesided=True, return_complex=True))
         enhance_spec = power_compress(enhance_spec)
@@ -338,7 +367,6 @@ class KDTrainer(BaseTrainer):
             teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
 
         if self.remix_snr and torch.rand(1)[0] > 0.5:
-        # if self.remix_snr:
             snr_scale = self.randomize.sample(torch.Size([1]))[0]
             sources = self.snr_scaler([noisy, clean], snr_scale=snr_scale)
             scaled_noise, clean = sources
@@ -350,16 +378,15 @@ class KDTrainer(BaseTrainer):
         student_generator_outputs["noisy"] = noisy
         student_generator_outputs["one_labels"] = one_labels
         se_loss = self.calculate_se_loss(student_generator_outputs)
-        if self.distiller is not None:
-            kd_loss = self.distiller(student_generator_outputs, teacher_generator_outputs)
-        else:
-            kd_loss = torch.tensor([0.0]).cuda()
+        kd_loss = self.distiller(student_generator_outputs, teacher_generator_outputs)
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert se_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {se_loss.dtype}"
 
-        # print("\n\n se loss {} - kd loss {}".format(se_loss, kd_loss))
-        loss = se_loss + kd_loss 
+        snr_mixing_generator_loss = self.snx_mixing_generator_loss(student_generator_outputs["est_mag"])
+        # print("generator loss:", snr_mixing_generator_loss)
+        
+        loss = se_loss + kd_loss + 0.1 * snr_mixing_generator_loss
 
         loss.backward()
         self.optimizer.step()
@@ -369,7 +396,7 @@ class KDTrainer(BaseTrainer):
             self.distiller_optimizer.step()
             self.distiller_optimizer.zero_grad()
 
-        # Train Discriminator
+        # Train Metric Discriminator
         student_generator_outputs['pesq_label'] = teacher_pesq_label
         discriminator_loss = self.calculate_discriminator_loss(student_generator_outputs)
         
@@ -380,14 +407,22 @@ class KDTrainer(BaseTrainer):
         else:
             discriminator_loss = torch.tensor([0.0]).cuda()
 
+        # Train mixSNR Discriminator
+        snr_mixing_discriminator_loss = self.snr_mixing_discriminator_loss(teacher_generator_outputs["est_mag"], student_generator_outputs["est_mag"].detach())
+        # print("discriminator loss:", snr_mixing_discriminator_loss)
+        snr_mixing_discriminator_loss.backward()
+        self.snr_mixing_disc_optimizer.step()
+        self.snr_mixing_disc_optimizer.zero_grad()
+
         # Logging
         # average over devices in ddp
         if self.n_gpus > 1:
             se_loss = self.gather(se_loss).mean()
             kd_loss = self.gather(kd_loss).mean()
             discriminator_loss = self.gather(discriminator_loss).mean()
+            snr_mixing_discriminator_loss = self.gather(snr_mixing_discriminator_loss).mean()
 
-        return se_loss.item(), kd_loss.item(), discriminator_loss.item()
+        return se_loss.item(), kd_loss.item(), snr_mixing_generator_loss.item(), discriminator_loss.item(), snr_mixing_discriminator_loss.item()
 
 
     def train_epoch(self, epoch) -> None:
@@ -398,7 +433,9 @@ class KDTrainer(BaseTrainer):
         loss_train = []
         se_loss_train = []
         kd_loss_train = []
+        snr_mixing_generator_loss_train = []
         discriminator_loss_train = []
+        snr_mixing_discriminator_loss_train = []
         self.epoch = epoch
 
         self.logger.info('\n <Epoch>: {} -- Start training '.format(epoch))
@@ -407,13 +444,15 @@ class KDTrainer(BaseTrainer):
 
         for idx, batch in enumerate(logprog):
             self.idx_step = idx
-            se_loss, kd_loss, discriminator_loss = self.train_step(batch)
+            se_loss, kd_loss, snr_mixing_generator_loss, discriminator_loss, snr_mixing_discriminator_loss = self.train_step(batch)
 
-            total_loss = se_loss + kd_loss
+            total_loss = se_loss + kd_loss + 0.1 * snr_mixing_generator_loss
             loss_train.append(total_loss)
             kd_loss_train.append(kd_loss)
             se_loss_train.append(se_loss)
+            snr_mixing_generator_loss_train.append(snr_mixing_generator_loss)
             discriminator_loss_train.append(discriminator_loss)
+            snr_mixing_discriminator_loss_train.append(snr_mixing_discriminator_loss)
         
             if self.rank  == 0:
                 logprog.update(gen_loss=format(total_loss, ".5f"))
@@ -422,10 +461,12 @@ class KDTrainer(BaseTrainer):
         loss_train = np.mean(loss_train)
         kd_loss_train = np.mean(kd_loss_train)
         se_loss_train = np.mean(se_loss_train)
+        snr_mixing_generator_loss_train = np.mean(snr_mixing_generator_loss_train)
         discriminator_loss_train = np.mean(discriminator_loss_train)
+        snr_mixing_discriminator_loss_train = np.mean(snr_mixing_discriminator_loss_train)
 
-        template = 'Train loss: {} - kd loss: {} - se loss: {} - discriminator loss: {}'
-        info = template.format(loss_train, kd_loss_train, se_loss_train, discriminator_loss_train)
+        template = 'Train loss: {} - kd loss: {} - se loss: {} - discriminator loss: {} - snr mixing generator loss: {} - snr mixing discriminator loss train {}'
+        info = template.format(loss_train, kd_loss_train, se_loss_train, discriminator_loss_train, snr_mixing_generator_loss_train, snr_mixing_discriminator_loss_train)
         if self.rank == 0:
             # print("Done epoch {} - {}".format(epoch, info))
             self.logger.info('-' * 70)
@@ -433,7 +474,9 @@ class KDTrainer(BaseTrainer):
             self.tsb_writer.add_scalar("Loss/train", loss_train, epoch)
             self.tsb_writer.add_scalar("Loss/train_kd_loss", kd_loss_train, epoch)
             self.tsb_writer.add_scalar("Loss/train_se_loss", se_loss_train, epoch)  
-            self.tsb_writer.add_scalar("Loss/discriminator_loss_train", discriminator_loss_train, epoch)    
+            self.tsb_writer.add_scalar("Loss/discriminator_loss_train", discriminator_loss_train, epoch)
+            self.tsb_writer.add_scalar("Loss/snr_mixing_generator_loss_train", snr_mixing_generator_loss_train, epoch)   
+            self.tsb_writer.add_scalar("Loss/snr_mixing_discriminator_loss_train", snr_mixing_discriminator_loss_train, epoch)   
             
         # ------------ Valid stage -------------------
         loss_valid = self.valid_epoch(epoch)
@@ -470,6 +513,7 @@ class KDTrainer(BaseTrainer):
         self.dist.barrier() # see https://stackoverflow.com/questions/59760328/how-does-torch-distributed-barrier-work
         self.scheduler.step()
         self.scheduler_D.step()
+        self.scheduler_snr_mixing_D.step()
         if self.scheduler_distiller is not None:
             self.scheduler_distiller.step()
 

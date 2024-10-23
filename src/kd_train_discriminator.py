@@ -32,7 +32,8 @@ def cleanup():
 def setup(rank, world_size):
     torch.cuda.set_device(rank)
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ['MASTER_PORT'] = '29501'
+    # os.environ['NCCL_BLOCKING_WAIT'] = '0'  # not to enforce timeout
     torch.distributed.init_process_group(
         backend="gloo",
         world_size=world_size,
@@ -62,7 +63,7 @@ def load_teacher_model(checkpoint_path, n_fft):
     teacher_model.load_state_dict(state_dict)
     return teacher_model
 
-def entry(rank, world_size, config, args):
+def entry(rank, world_size, config):
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     setup(rank, world_size)
     if rank == 0:
@@ -100,7 +101,6 @@ def entry(rank, world_size, config, args):
 
     log_dir = save_model_dir
     logger = get_logger(log_dir=log_dir, log_name="train.log", resume=resume, is_rank0=rank==0)
-    logger.info(f"Argument: {args}")
 
     # Create train dataloader
     train_ds, test_ds = dataloader2.load_data(    
@@ -128,11 +128,16 @@ def entry(rank, world_size, config, args):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=init_lr)
     optimizer_disc = torch.optim.AdamW(discriminator_model.parameters(), lr=2 * init_lr)
-    
+
+
+    print("---------- forward teacher: ", forward_teacher)
     if forward_teacher:
         distiller = Distiller(config)
         distiller = DistributedDataParallel(distiller.to(rank), device_ids=[rank], find_unused_parameters=True)
         distiller_optimizer = torch.optim.AdamW(distiller.parameters(), lr=init_lr)
+    elif len(list(config['main']['criterion']['kd_weight'])) > 0:
+        distiller = Distiller(config)
+        distiller_optimizer = None
     else:
         distiller = None
         distiller_optimizer = None
@@ -140,7 +145,7 @@ def entry(rank, world_size, config, args):
 
     if rank == 0:
         logger.info(f"---------- Summary for student model")
-        summary(model, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
+        summary(model.module, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
 
     # tensorboard writer
     writer = SummaryWriter(os.path.join(save_model_dir, "tsb_log"))
@@ -213,23 +218,24 @@ if __name__ == '__main__':
                                         default="/home/minhkhanh/Desktop/work/denoiser/CMGAN/src/config.toml")
 
 
-    args = parser.parse_args()
-    config = toml.load(args.config)
+    argument = parser.parse_args()
+    config = toml.load(argument.config)
 
     available_gpus = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
     print("GPU list:", available_gpus)
-    args.n_gpus = len(available_gpus)
-    print("Number of gpu:", args.n_gpus)
+    argument.n_gpus = len(available_gpus)
+    print("Number of gpu:", argument.n_gpus)
 
     try: 
         mp.spawn(entry,
-                args=(args.n_gpus, config, args),
-                nprocs=args.n_gpus,
+                args=(argument.n_gpus, config),
+                nprocs=argument.n_gpus,
                 join=True)
     except KeyboardInterrupt:
         print('Interrupted')
         try: 
-            dist.destroy_process_group()  
+            cleanup() 
         except KeyboardInterrupt: 
-            os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ")
+            os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ") 
+
     

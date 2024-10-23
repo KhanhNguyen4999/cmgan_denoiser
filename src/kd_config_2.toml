@@ -1,12 +1,12 @@
 [main]
-name = "CMGAN_stage2_v2_kd_logit_AFD_classic_enc_dec_u64_to_u32_dilation"
+name = "CMGAN_unet_32_bilinear_discriminator_dilation_kd_logit_remix"
 seed = 0
-epochs = 101
+epochs = 100
 cut_len = 32000
 save_model_dir = "/root/khanhnnm/se/checkpoint"
 use_amp = false
 use_ZeRo = false
-teacher_checkpoint = "/root/khanhnnm/se/checkpoint/CMGAN_unet_64_bilinear_discriminator_dilation_kd_logit/checkpoints/best.th"
+teacher_checkpoint = "/root/khanhnnm/se/cmgan_denoiser/src/best_ckpt/ckpt"
 student_model = "Unet32"
 sr = 16000
 interval_eval = 5
@@ -44,7 +44,7 @@ gamma = 0.5
 path = "trainer.kd_trainer_final_discriminator.KDTrainer"
 
 [main.augment]
-remix = 
+remix = true
 remix_snr = false
 
 [main.loss_weights]
@@ -55,11 +55,11 @@ gan = 0.05
 
 [main.criterion]
 KDLoss = true
-AFDLoss = true
+AFDLoss = false
 AKD = false
 FAKD = false
 UCLFWPKD = false
-kd_weight = [ 1.0, 1.0,]
+kd_weight = [ 1.0,]
 
 [dataset_train.dataloader]
 batchsize = 16

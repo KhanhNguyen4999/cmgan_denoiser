@@ -55,7 +55,7 @@ def enhance_one_track(model, audio_path, saved_dir, cut_len, n_fft=400, hop=100,
             import torch.nn.functional as F
             noisy_spec = F.pad(noisy_spec, (0, 0, 0, 1))
 
-        est_real, est_imag, _ = model(noisy_spec)
+        est_real, est_imag, _, _ = model(noisy_spec)
         time_end = time.time()
         est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
 
@@ -132,7 +132,7 @@ def evaluation32(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
           'RTF: ', RTF )
 
 # def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
-#     pesq_label_writer = open("/root/khanhnnm/se/VCTK/test/pesq_label.txt", "w")
+#     # pesq_label_writer = open("/root/khanhnnm/se/VCTK/test/pesq_label.txt", "w")
 #     n_fft = 400
 #     model = generator.TSCNet(num_channel=64, num_features=n_fft // 2 + 1).cuda()
 #     model.load_state_dict((torch.load(model_path)))
@@ -155,12 +155,13 @@ def evaluation32(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
 #         clean_audio, sr = sf.read(clean_path)
 #         assert sr == 16000
 #         if est_audio is None:
-#             pesq_label_writer.write("{} {}\n".format(audio, 0.0))
+#             # pesq_label_writer.write("{} {}\n".format(audio, 0.0))
+#             None
 #         else: 
 #             metrics = compute_metrics(clean_audio, est_audio, sr, 3.5)
 #             metrics = np.array(metrics)
 #             metrics_total += metrics
-#             pesq_label_writer.write("{} {}\n".format(audio, metrics[0]))
+#             # pesq_label_writer.write("{} {}\n".format(audio, metrics[0]))
 
 #     metrics_avg = metrics_total / num
 #     print(
@@ -177,7 +178,7 @@ def evaluation32(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
 #         "stoi: ",
 #         metrics_avg[5],
 #     )
-#     pesq_label_writer.close()
+#     # pesq_label_writer.close()
 
 def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
     n_fft = 400
@@ -235,10 +236,16 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
         new_state_dict[name] = v
 
     #model = generator.TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
-    model = UNet16(n_channels=3, bilinear=True)
+    model = UNet32(n_channels=3, bilinear=True)
     model.load_state_dict(new_state_dict)
     model.eval()
     model = model.cuda()
+
+    #----
+    # n_fft = 400
+    # model = generator.TSCNet(num_channel=64, num_features=n_fft // 2 + 1).cuda()
+    # model.load_state_dict((torch.load(model_path)))
+    # model.eval()
 
     if not os.path.exists(saved_dir):
         os.mkdir(saved_dir)
@@ -250,7 +257,7 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
                 delayed(enhance_one_track)(model,
                                             os.path.join(noisy_dir, audio),
                                             saved_dir,
-                                            16000*10,
+                                            16000*15,
                                             n_fft,
                                             n_fft//4,
                                             save_tracks
@@ -282,7 +289,7 @@ def evaluation_last(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
     map_location='cuda'
     package = torch.load(model_path + "/checkpoint.tar", map_location = map_location)
     
-    model = UNet16(n_channels=3, bilinear=True)
+    model = UNet32(n_channels=3, bilinear=True)
     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         model.module.load_state_dict(package['model'])
     else:
@@ -360,4 +367,4 @@ if __name__ == '__main__':
         clean_dir = os.path.join(args.test_dir, 'clean')
         load_from_checkpoint = True
         args.save_tracks = True
-        evaluation(args.model_path, noisy_dir, clean_dir, args.save_tracks, args.save_dir)
+        evaluation_last(args.model_path, noisy_dir, clean_dir, args.save_tracks, args.save_dir)

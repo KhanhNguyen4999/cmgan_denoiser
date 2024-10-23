@@ -25,7 +25,7 @@ class SNRScale(nn.Module):
     def calculate_rms(self, signal):
         return torch.sqrt(torch.mean(signal ** 2, dim=-1))
 
-    def forward(self, sources, snr_scale = 1.2):
+    def forward(self, sources, snr_scale = 0.8):
         noisy, clean = sources
         noise = noisy - clean
 

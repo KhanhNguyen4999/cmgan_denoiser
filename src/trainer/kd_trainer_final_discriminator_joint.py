@@ -105,6 +105,7 @@ class KDTrainer(BaseTrainer):
             augments.append(Remix())
         
         self.snr_scaler = SNRScale()
+        self.randomize = torch.distributions.uniform.Uniform(0.5, 1)
         self.augment = torch.nn.Sequential(*augments)
 
         if not os.path.exists(self.save_enhanced_dir):
@@ -223,9 +224,9 @@ class KDTrainer(BaseTrainer):
         clean_imag = clean_spec[:, 1, :, :].unsqueeze(1)
         if type == "teacher":
             with torch.no_grad():
-                est_real, est_imag, features = model(noisy_spec)
+                est_real, est_imag, features_enc, features_dec = model(noisy_spec)
         else:
-            est_real, est_imag, features = model(noisy_spec)
+            est_real, est_imag, features_enc, features_dec = model(noisy_spec)
 
         est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
         est_mag = torch.sqrt(est_real**2 + est_imag**2)
@@ -243,7 +244,8 @@ class KDTrainer(BaseTrainer):
             "clean_imag": clean_imag,
             "clean_mag": clean_mag,
             "est_audio": est_audio,
-            "features": features
+            "features_enc": features_enc,
+            "features_dec": features_dec,
         }
 
     def calculate_se_loss(self, generator_outputs):
@@ -317,10 +319,13 @@ class KDTrainer(BaseTrainer):
         teacher_pesq_label = teacher_pesq_label.type(torch.float32)
 
         teacher_enhance = batch[2].cuda()
+        auxiliary_teacher_enhance = batch[3].cuda()
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
         noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
         noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
+        teacher_enhance = torch.transpose(teacher_enhance, 0, 1)
+        teacher_enhance = torch.transpose(teacher_enhance * c, 0, 1) 
 
         if self.remix:
             sources = torch.stack([noisy - clean, clean])
@@ -329,14 +334,17 @@ class KDTrainer(BaseTrainer):
             noisy = noise + clean
         
         if self.forward_teacher:
-            teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
+            auxiliary_teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
         else:
-            teacher_enhance = torch.transpose(teacher_enhance, 0, 1)
-            teacher_enhance = torch.transpose(teacher_enhance * c, 0, 1) 
-            teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+            auxiliary_teacher_enhance = torch.transpose(auxiliary_teacher_enhance, 0, 1)
+            auxiliary_teacher_enhance = torch.transpose(auxiliary_teacher_enhance * c, 0, 1) 
+            auxiliary_teacher_generator_outputs = self.forward_only_teacher_step(auxiliary_teacher_enhance)
 
-        if self.remix_snr:
-            sources = self.snr_scaler([noisy, clean], snr_scale=0.8)
+        teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+        if self.remix_snr and torch.rand(1)[0] > 0.5:
+        # if self.remix_snr:
+            snr_scale = self.randomize.sample(torch.Size([1]))[0]
+            sources = self.snr_scaler([noisy, clean], snr_scale=snr_scale)
             scaled_noise, clean = sources
             noisy = scaled_noise + clean
 
@@ -346,15 +354,15 @@ class KDTrainer(BaseTrainer):
         student_generator_outputs["noisy"] = noisy
         student_generator_outputs["one_labels"] = one_labels
         se_loss = self.calculate_se_loss(student_generator_outputs)
-        if self.forward_teacher:
-            kd_loss = self.distiller(student_generator_outputs, teacher_generator_outputs)
+        if self.distiller is not None:
+            kd_loss = self.distiller(student_generator_outputs, auxiliary_teacher_generator_outputs, teacher_generator_outputs)
         else:
-            kd_loss = torch.tensor(0.0)
+            kd_loss = torch.tensor([0.0]).cuda()
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert se_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {se_loss.dtype}"
 
-        
+        # print("\n\n se loss {} - kd loss {}".format(se_loss, kd_loss))
         loss = se_loss + kd_loss 
 
         loss.backward()
@@ -374,7 +382,7 @@ class KDTrainer(BaseTrainer):
             self.discriminator_model_optimizer.step()
             self.discriminator_model_optimizer.zero_grad()
         else:
-            discriminator_loss = torch.tensor([0.0])
+            discriminator_loss = torch.tensor([0.0]).cuda()
 
         # Logging
         # average over devices in ddp

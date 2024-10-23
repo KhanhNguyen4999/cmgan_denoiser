@@ -20,7 +20,6 @@ class nn_bn_relu(nn.Module):
             return self.relu(self.bn(self.linear(x)))
         return self.bn(self.linear(x))
 
-
 class AFD(nn.Module):
     def __init__(self, t_shapes, s_shapes, qk_dim=512):
         super(AFD, self).__init__()
@@ -52,7 +51,6 @@ class AFD(nn.Module):
             h_t = h_t_all[i]
             diff = self.cal_diff(h_hat_s, h_t, atts[:, i])
             loss += diff
-        print("loss: ", loss)
         return loss
 
     def cal_diff(self, v_s, v_t, att):
@@ -63,6 +61,20 @@ class AFD(nn.Module):
         diff = torch.mul(diff, att).sum(1).mean()
         return diff
 
+
+class AFDEncDec(nn.Module):
+    def __init__(self, t_shapes_enc, t_shapes_dec, s_shapes_enc, s_shapes_dec, qk_dim=512):
+        super(AFDEncDec, self).__init__()
+        self.afd_enc = AFD(t_shapes=t_shapes_enc, s_shapes=s_shapes_enc, qk_dim=qk_dim)
+        self.afd_dec = AFD(t_shapes=t_shapes_dec, s_shapes=s_shapes_dec, qk_dim=qk_dim)
+
+    def forward(self, g_t_enc, g_t_dec, g_s_enc, g_s_dec):
+        loss_enc = self.afd_enc(g_s_enc, g_t_enc)
+        loss_dec = self.afd_dec(g_s_dec, g_t_dec)
+        print("loss enc: {} - loss dec: {}".format(loss_enc, loss_dec))
+        return loss_enc + loss_dec
+    
+    
 class LinearTransformTeacher(nn.Module):
     def __init__(self, t_shapes, qk_dim):
         super(LinearTransformTeacher, self).__init__()

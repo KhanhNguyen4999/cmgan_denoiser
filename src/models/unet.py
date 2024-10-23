@@ -12,7 +12,12 @@ class DilatedDenseNet(nn.Module):
         self.twidth = 2
         self.kernel_size = (self.twidth, 3)
         for i in range(self.depth):
-            dil = 1
+            # dil = 1
+            if in_channels == 64 or in_channels == 32:
+                dil = 2 ** i
+            else:
+                dil = 1
+                
             pad_length = self.twidth + (dil - 1) * (self.twidth - 1) - 1
             setattr(self, 'pad{}'.format(i + 1), nn.ConstantPad2d((1, 1, pad_length, 0), value=0.))
             setattr(self, 'conv{}'.format(i + 1),
@@ -171,22 +176,22 @@ class UNet16(nn.Module):
         x4 = self.down3(x3)
         x5 = self.down4(x4)
 
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
+        x_up1 = self.up1(x5, x4)
+        x_up2 = self.up2(x_up1, x3)
+        x_up3 = self.up3(x_up2, x2)
+        x_up4 = self.up4(x_up3, x1)
 
         # Decoder
-        mask = self.mask_decoder(x)
+        mask = self.mask_decoder(x_up4)
         out_mag = mask * mag
 
-        complex_out = self.complex_decoder(x)
+        complex_out = self.complex_decoder(x_up4)
         mag_real = out_mag * torch.cos(noisy_phase)
         mag_imag = out_mag * torch.sin(noisy_phase)
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag, [x1, x2, x3, x4]
+        return final_real, final_imag, [x1, x2, x3, x4, x5], [x_up1, x_up2, x_up3, x_up4]
     
 """ Full assembly of the parts to form the complete network """
 class UNet32(nn.Module):
@@ -223,22 +228,22 @@ class UNet32(nn.Module):
         x4 = self.down3(x3)
         x5 = self.down4(x4)
 
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
+        x_up1 = self.up1(x5, x4)
+        x_up2 = self.up2(x_up1, x3)
+        x_up3 = self.up3(x_up2, x2)
+        x_up4 = self.up4(x_up3, x1)
 
         # Decoder
-        mask = self.mask_decoder(x)
+        mask = self.mask_decoder(x_up4)
         out_mag = mask * mag
 
-        complex_out = self.complex_decoder(x)
+        complex_out = self.complex_decoder(x_up4)
         mag_real = out_mag * torch.cos(noisy_phase)
         mag_imag = out_mag * torch.sin(noisy_phase)
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag, [x4]
+        return final_real, final_imag, [x1, x2, x3, x4, x5], [x_up1, x_up2, x_up3, x_up4]
     
 class UNet64(nn.Module):
     def __init__(self, n_channels, bilinear=False):
@@ -274,19 +279,19 @@ class UNet64(nn.Module):
         x4 = self.down3(x3)
         x5 = self.down4(x4)
 
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
+        x_up1 = self.up1(x5, x4)
+        x_up2 = self.up2(x_up1, x3)
+        x_up3 = self.up3(x_up2, x2)
+        x_up4 = self.up4(x_up3, x1)
 
         # Decoder
-        mask = self.mask_decoder(x)
+        mask = self.mask_decoder(x_up4)
         out_mag = mask * mag
 
-        complex_out = self.complex_decoder(x)
+        complex_out = self.complex_decoder(x_up4)
         mag_real = out_mag * torch.cos(noisy_phase)
         mag_imag = out_mag * torch.sin(noisy_phase)
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag, [x1, x2, x3,x4]
+        return final_real, final_imag, [x1, x2, x3, x4, x5], [x_up1, x_up2, x_up3, x_up4]

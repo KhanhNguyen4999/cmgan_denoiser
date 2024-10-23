@@ -32,8 +32,7 @@ def cleanup():
 def setup(rank, world_size):
     torch.cuda.set_device(rank)
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29501'
-    # os.environ['NCCL_BLOCKING_WAIT'] = '0'  # not to enforce timeout
+    os.environ['MASTER_PORT'] = '29500'
     torch.distributed.init_process_group(
         backend="gloo",
         world_size=world_size,
@@ -63,7 +62,7 @@ def load_teacher_model(checkpoint_path, n_fft):
     teacher_model.load_state_dict(state_dict)
     return teacher_model
 
-def entry(rank, world_size, config):
+def entry(rank, world_size, config, args):
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     setup(rank, world_size)
     if rank == 0:
@@ -101,6 +100,7 @@ def entry(rank, world_size, config):
 
     log_dir = save_model_dir
     logger = get_logger(log_dir=log_dir, log_name="train.log", resume=resume, is_rank0=rank==0)
+    logger.info(f"Argument: {args}")
 
     # Create train dataloader
     train_ds, test_ds = dataloader2.load_data(    
@@ -126,8 +126,12 @@ def entry(rank, world_size, config):
     discriminator_model = discriminator.Discriminator(ndf=16).cuda()
     discriminator_model = DistributedDataParallel(discriminator_model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
+    snr_mixing_discriminator_model = discriminator.SNRMixingDiscriminator(ndf=16).cuda()
+    snr_mixing_discriminator_model = DistributedDataParallel(snr_mixing_discriminator_model.to(rank), device_ids=[rank], find_unused_parameters=True)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=init_lr)
-    optimizer_disc = torch.optim.AdamW(discriminator_model.parameters(), lr=2 * init_lr)
+    disc_optimizer = torch.optim.AdamW(discriminator_model.parameters(), lr=2 * init_lr)
+    snr_mixing_disc_optimizer = torch.optim.AdamW(snr_mixing_discriminator_model.parameters(), lr=2 * init_lr)
     
     if forward_teacher:
         distiller = Distiller(config)
@@ -143,7 +147,7 @@ def entry(rank, world_size, config):
 
     if rank == 0:
         logger.info(f"---------- Summary for student model")
-        summary(model.module, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
+        summary(model, [(1, 2, cut_len//hop+1, int(n_fft/2)+1)])
 
     # tensorboard writer
     writer = SummaryWriter(os.path.join(save_model_dir, "tsb_log"))
@@ -157,7 +161,8 @@ def entry(rank, world_size, config):
     trainer_class = initialize_module(config["trainer"]["path"], initialize=False)
     # scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
-    scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=decay_epoch, gamma=gamma)
+    scheduler_D = torch.optim.lr_scheduler.StepLR(disc_optimizer, step_size=decay_epoch, gamma=gamma)
+    scheduler_snr_mixing_D = torch.optim.lr_scheduler.StepLR(snr_mixing_disc_optimizer, step_size=decay_epoch, gamma=gamma)
     if forward_teacher:
         scheduler_distiller = torch.optim.lr_scheduler.StepLR(distiller_optimizer, step_size=decay_epoch, gamma=gamma)
     else:
@@ -173,6 +178,8 @@ def entry(rank, world_size, config):
         model = model,
         teacher_model = teacher_model,
         discriminator_model = discriminator_model,
+        snr_mixing_discriminator_model = snr_mixing_discriminator_model,
+
         distiller = distiller,
         train_ds = train_ds,
         test_ds = test_ds,
@@ -180,10 +187,12 @@ def entry(rank, world_size, config):
         scheduler = scheduler,
         scheduler_D = scheduler_D,
         scheduler_distiller = scheduler_distiller,
-        
+        scheduler_snr_mixing_D = scheduler_snr_mixing_D,
+
         optimizer = optimizer,
         distiller_optimizer = distiller_optimizer,
-        discriminator_optimizer = optimizer_disc,
+        discriminator_optimizer = disc_optimizer,
+        snr_mixing_disc_optimizer = snr_mixing_disc_optimizer,
         
         loss_weights = loss_weights,
         hop = hop,
@@ -216,24 +225,23 @@ if __name__ == '__main__':
                                         default="/home/minhkhanh/Desktop/work/denoiser/CMGAN/src/config.toml")
 
 
-    argument = parser.parse_args()
-    config = toml.load(argument.config)
+    args = parser.parse_args()
+    config = toml.load(args.config)
 
     available_gpus = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
     print("GPU list:", available_gpus)
-    argument.n_gpus = len(available_gpus)
-    print("Number of gpu:", argument.n_gpus)
+    args.n_gpus = len(available_gpus)
+    print("Number of gpu:", args.n_gpus)
 
     try: 
         mp.spawn(entry,
-                args=(argument.n_gpus, config),
-                nprocs=argument.n_gpus,
+                args=(args.n_gpus, config, args),
+                nprocs=args.n_gpus,
                 join=True)
     except KeyboardInterrupt:
         print('Interrupted')
         try: 
-            cleanup() 
+            dist.destroy_process_group()  
         except KeyboardInterrupt: 
-            os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ") 
-
+            os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ")
     

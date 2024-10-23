@@ -274,13 +274,16 @@ class KDTrainer(BaseTrainer):
         )
         return loss   
     
-    def calculate_discriminator_loss(self, generator_outputs):
+    def calculate_discriminator_loss(self, generator_outputs, teacher_generator_outputs):
 
         length = generator_outputs["est_audio"].size(-1)
         # pesq_score = generator_outputs['pesq_label'] / 4.5
         est_audio_list = list(generator_outputs["est_audio"].detach().cpu().numpy())
         clean_audio_list = list(generator_outputs["clean"].cpu().numpy()[:, :length])
         pesq_score = discriminator.batch_pesq(clean_audio_list, est_audio_list)
+
+        teacher_est_audio_list = list(teacher_generator_outputs["est_audio"].detach().cpu().numpy())
+        teacher_pesq_score = discriminator.batch_pesq(teacher_est_audio_list, est_audio_list)
 
         # The calculation of PESQ can be None due to silent part
         if pesq_score is not None:
@@ -292,8 +295,17 @@ class KDTrainer(BaseTrainer):
             )
             discrim_loss_metric = F.mse_loss(predict_max_metric.flatten(), generator_outputs['one_labels']) \
                                 + F.mse_loss(predict_enhance_metric.flatten(), pesq_score)
+            
+            if teacher_pesq_score is not None:
+                discrim_loss_metric += F.mse_loss(predict_enhance_metric.flatten(), teacher_pesq_score)
         else:
-            discrim_loss_metric = None
+            predict_enhance_metric = self.discriminator_model(
+                generator_outputs["clean_mag"], generator_outputs["est_mag"].detach()
+            )
+            if teacher_pesq_score is not None:
+                discrim_loss_metric = F.mse_loss(predict_enhance_metric.flatten(), teacher_pesq_score)
+            else:
+                discrim_loss_metric = None
         
         return discrim_loss_metric
 
@@ -371,7 +383,7 @@ class KDTrainer(BaseTrainer):
 
         # Train Discriminator
         student_generator_outputs['pesq_label'] = teacher_pesq_label
-        discriminator_loss = self.calculate_discriminator_loss(student_generator_outputs)
+        discriminator_loss = self.calculate_discriminator_loss(student_generator_outputs, teacher_generator_outputs)
         
         if discriminator_loss is not None:
             discriminator_loss.backward()

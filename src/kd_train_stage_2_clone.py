@@ -9,7 +9,7 @@ from utils import *
 from models.unet import UNet16, UNet32, UNet64
 from models.generator import TSCNet
 from models import discriminator
-from models.distiller import Distiller
+from models.distiller import Distiller, DistillerStage2, DistillerStage2Version2, DistillerStagev3
 from time import gmtime, strftime
 from data import dataloader2
 import torch.distributed as dist
@@ -32,7 +32,7 @@ def cleanup():
 def setup(rank, world_size):
     torch.cuda.set_device(rank)
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29501'
+    os.environ['MASTER_PORT'] = '29500'
     # os.environ['NCCL_BLOCKING_WAIT'] = '0'  # not to enforce timeout
     torch.distributed.init_process_group(
         backend="gloo",
@@ -44,7 +44,7 @@ def load_state_dict_from_checkpoint(checkpoint_path):
     from collections import OrderedDict
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
-        name = k
+        name = k[7:]
         new_state_dict[name] = v
     return new_state_dict
 
@@ -57,11 +57,21 @@ def load_student_model(model_type, n_channels):
         model = UNet64(n_channels=n_channels, bilinear=True)
     return model
 
-def load_teacher_model(checkpoint_path, n_fft):
+def load_teacher_model(checkpoint_path, n_channels):
     state_dict = load_state_dict_from_checkpoint(checkpoint_path)
-    teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
-    teacher_model.load_state_dict(state_dict)
-    return teacher_model
+    model = UNet32(n_channels=n_channels, bilinear=True)
+    model.load_state_dict(state_dict)
+    # map_location='cuda'
+    # package = torch.load(checkpoint_path, map_location = map_location)
+    # model = UNet32(n_channels=n_channels, bilinear=True)
+    # if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+    #     model.module.load_state_dict(package['model'])
+    # else:
+    #     model.load_state_dict(package['model'])
+
+    model.eval()
+    model = model.cuda()
+    return model
 
 def entry(rank, world_size, config):
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
@@ -115,13 +125,13 @@ def entry(rank, world_size, config):
 
     logger.info(f"Total iteration through trainset: {len(train_ds)}")
     logger.info(f"Total iteration through testset: {len(test_ds)}")
-    forward_teacher = config['main']['criterion']['AKD'] or config['main']['criterion']['AFDLoss'] or config['main']['criterion']['FAKD']
+    forward_teacher = config['main']['criterion']['AKD'] or \
+                        config['main']['criterion']['AFDLoss'] or \
+                        config['main']['criterion']['FAKD'] or \
+                        config['main']['criterion']['UCLFWPKD']
     
     model = load_student_model(model_type=config["main"]["student_model"], n_channels=num_channel)
     model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
-
-    teacher_model = load_teacher_model(checkpoint_path=config['main']['teacher_checkpoint'], n_fft=n_fft)
-    teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
     discriminator_model = discriminator.Discriminator(ndf=16).cuda()
     discriminator_model = DistributedDataParallel(discriminator_model.to(rank), device_ids=[rank], find_unused_parameters=True)
@@ -129,16 +139,22 @@ def entry(rank, world_size, config):
     optimizer = torch.optim.AdamW(model.parameters(), lr=init_lr)
     optimizer_disc = torch.optim.AdamW(discriminator_model.parameters(), lr=2 * init_lr)
     
+    print("---------- forward teacher: ", forward_teacher)
     if forward_teacher:
-        distiller = Distiller(config)
+        distiller = DistillerStage2(config)
         distiller = DistributedDataParallel(distiller.to(rank), device_ids=[rank], find_unused_parameters=True)
         distiller_optimizer = torch.optim.AdamW(distiller.parameters(), lr=init_lr)
+
+        teacher_model = load_teacher_model(checkpoint_path=config['main']['teacher_checkpoint'], n_channels=num_channel)
+        teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
     elif len(list(config['main']['criterion']['kd_weight'])) > 0:
-        distiller = Distiller(config)
+        distiller = DistillerStage2(config)
         distiller_optimizer = None
+        teacher_model = None
     else:
         distiller = None
         distiller_optimizer = None
+        teacher_model = None
 
 
     if rank == 0:
