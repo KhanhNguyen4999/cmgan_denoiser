@@ -1,0 +1,79 @@
+[main]
+name = "CMGAN_unet_64_bilinear_discriminator_kd_logit"
+seed = 0
+epochs = 100
+cut_len = 32000
+save_model_dir = "/root/khanhnnm/se/checkpoint/librimix"
+use_amp = false
+use_ZeRo = false
+teacher_checkpoint = "/root/khanhnnm/se/checkpoint/librimix/CMGAN_librimix/checkpoints/best.th"
+student_model = "Unet64"
+sr = 16000
+interval_eval = 10
+resume = true
+max_clip_grad_norm = 2.0
+gradient_accumulation_steps = 1
+num_prints = 5
+
+[model]
+type = "unet"
+num_channel = 3
+
+[feature]
+n_fft = 400
+hop = 100
+ndf = 16
+
+[dataset_train]
+path = "/root/khanhnnm/se/LibriMix/storage_dir/Libri2Mix/wav16k/min/train-100"
+
+[dataset_valid]
+path = "/root/khanhnnm/se/LibriMix/storage_dir/Libri2Mix/wav16k/min/dev"
+
+[dataset_test]
+path = "/root/khanhnnm/se/LibriMix/storage_dir/Libri2Mix/wav16k/min/test"
+
+[optimizer]
+init_lr = 0.005
+
+[scheduler]
+decay_epoch = 20
+gamma = 0.5
+
+[trainer]
+path = "trainer.kd_trainer_final_discriminator.KDTrainer"
+
+[main.augment]
+remix = false
+remix_snr = false
+
+[main.loss_weights]
+ri = 0.1
+mag = 0.9
+time = 0.2
+gan = 0.05
+
+[main.criterion]
+KDLoss = true
+AFDLoss = false
+AKD = false
+FAKD = false
+UCLFWPKD = false
+kd_weight = [ 1.0,]
+
+[dataset_train.dataloader]
+batchsize = 16
+n_worker = 4
+pin_memory = true
+
+[dataset_train.sampler]
+shuffle = true
+drop_last = true
+
+[dataset_valid.dataloader]
+batchsize = 16
+n_worker = 4
+
+[dataset_valid.sampler]
+shuffle = true
+drop_last = false
