@@ -59,14 +59,6 @@ def load_teacher_model(checkpoint_path, n_channels):
     state_dict = load_state_dict_from_checkpoint(checkpoint_path)
     model = UNet64(n_channels=n_channels, bilinear=True)
     model.load_state_dict(state_dict)
-    # map_location='cuda'
-    # package = torch.load(checkpoint_path, map_location = map_location)
-    # model = UNet64(n_channels=3, bilinear=True)
-    # if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-    #     model.module.load_state_dict(package['model'])
-    # else:
-    #     model.load_state_dict(package['model'])
-
     model.eval()
     model = model.cuda()
     return model
@@ -238,10 +230,12 @@ if __name__ == '__main__':
     print("Number of gpu:", argument.n_gpus)
 
     try: 
-        mp.spawn(entry,
-                args=(argument.n_gpus, config),
-                nprocs=argument.n_gpus,
-                join=True)
+        # mp.spawn(entry,
+        #         args=(argument.n_gpus, config),
+        #         nprocs=argument.n_gpus,
+        #         join=True)
+
+        entry(rank=0, world_size=1, config=config)
     except KeyboardInterrupt:
         print('Interrupted')
         try: 

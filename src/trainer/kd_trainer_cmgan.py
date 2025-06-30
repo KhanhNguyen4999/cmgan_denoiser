@@ -104,7 +104,6 @@ class KDTrainer(BaseTrainer):
         if remix:
             augments.append(Remix())
         
-        self.snr_scaler = SNRScale()
         self.randomize = torch.distributions.uniform.Uniform(0.5, 1)
         self.augment = torch.nn.Sequential(*augments)
 
@@ -275,9 +274,7 @@ class KDTrainer(BaseTrainer):
         return loss   
     
     def calculate_discriminator_loss(self, generator_outputs):
-
         length = generator_outputs["est_audio"].size(-1)
-        # pesq_score = generator_outputs['pesq_label'] / 4.5
         est_audio_list = list(generator_outputs["est_audio"].detach().cpu().numpy())
         clean_audio_list = list(generator_outputs["clean"].cpu().numpy()[:, :length])
         pesq_score = discriminator.batch_pesq(clean_audio_list, est_audio_list)
@@ -315,38 +312,18 @@ class KDTrainer(BaseTrainer):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
         one_labels = torch.ones(clean.size(0)).cuda()
-        teacher_pesq_label = batch[4].cuda()
-        teacher_pesq_label = teacher_pesq_label.type(torch.float32)
 
-        teacher_enhance = batch[2].cuda()
-        auxiliary_teacher_enhance = batch[3].cuda()
         # Normalization
         c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
         noisy, clean = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1)
         noisy, clean = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1)
-        teacher_enhance = torch.transpose(teacher_enhance, 0, 1)
-        teacher_enhance = torch.transpose(teacher_enhance * c, 0, 1) 
 
         if self.remix:
             sources = torch.stack([noisy - clean, clean])
             sources = self.augment(sources)
             noise, clean = sources
             noisy = noise + clean
-        
-        if self.forward_teacher:
-            auxiliary_teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
-        else:
-            auxiliary_teacher_enhance = torch.transpose(auxiliary_teacher_enhance, 0, 1)
-            auxiliary_teacher_enhance = torch.transpose(auxiliary_teacher_enhance * c, 0, 1) 
-            auxiliary_teacher_generator_outputs = self.forward_only_teacher_step(auxiliary_teacher_enhance)
 
-        teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
-        if self.remix_snr and torch.rand(1)[0] > 0.5:
-        # if self.remix_snr:
-            snr_scale = self.randomize.sample(torch.Size([1]))[0]
-            sources = self.snr_scaler([noisy, clean], snr_scale=snr_scale)
-            scaled_noise, clean = sources
-            noisy = scaled_noise + clean
 
         student_generator_outputs = self.forward_step(self.model, clean, noisy, "student")
         
@@ -354,27 +331,17 @@ class KDTrainer(BaseTrainer):
         student_generator_outputs["noisy"] = noisy
         student_generator_outputs["one_labels"] = one_labels
         se_loss = self.calculate_se_loss(student_generator_outputs)
-        if self.distiller is not None:
-            kd_loss = self.distiller(student_generator_outputs, auxiliary_teacher_generator_outputs, teacher_generator_outputs)
-        else:
-            kd_loss = torch.tensor([0.0]).cuda()
 
         # loss is float32 because mse_loss layers autocast to float32.
         assert se_loss.dtype is torch.float32, f"loss's dtype is not torch.float32 but {se_loss.dtype}"
 
-        # print("\n\n se loss {} - kd loss {}".format(se_loss, kd_loss))
-        loss = se_loss + kd_loss 
+        loss = se_loss 
 
         loss.backward()
         self.optimizer.step()
         self.optimizer.zero_grad()
 
-        if self.forward_teacher:
-            self.distiller_optimizer.step()
-            self.distiller_optimizer.zero_grad()
-
         # Train Discriminator
-        student_generator_outputs['pesq_label'] = teacher_pesq_label
         discriminator_loss = self.calculate_discriminator_loss(student_generator_outputs)
         
         if discriminator_loss is not None:
@@ -388,10 +355,9 @@ class KDTrainer(BaseTrainer):
         # average over devices in ddp
         if self.n_gpus > 1:
             se_loss = self.gather(se_loss).mean()
-            kd_loss = self.gather(kd_loss).mean()
             discriminator_loss = self.gather(discriminator_loss).mean()
 
-        return se_loss.item(), kd_loss.item(), discriminator_loss.item()
+        return se_loss.item(), 0.0, discriminator_loss.item()
 
 
     def train_epoch(self, epoch) -> None:
@@ -418,7 +384,8 @@ class KDTrainer(BaseTrainer):
             kd_loss_train.append(kd_loss)
             se_loss_train.append(se_loss)
             discriminator_loss_train.append(discriminator_loss)
-        
+            # print("---total loss: ", total_loss, kd_loss, se_loss)
+            # print("---mean loss: ", np.mean(loss_train), np.mean(kd_loss_train))
             if self.rank  == 0:
                 logprog.update(gen_loss=format(total_loss, ".5f"))
 
@@ -456,8 +423,8 @@ class KDTrainer(BaseTrainer):
 
             if epoch % self.interval_eval == 0:
                 metrics_avg = evaluation_model(self.model.module, 
-                                self.data_test_dir + "/noisy", 
-                                self.data_test_dir + "/clean",
+                                self.data_test_dir + "/mix_single", 
+                                self.data_test_dir + "/s1",
                                 True, 
                                 self.save_enhanced_dir)
 

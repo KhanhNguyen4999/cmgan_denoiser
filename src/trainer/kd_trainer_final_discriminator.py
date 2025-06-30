@@ -277,7 +277,6 @@ class KDTrainer(BaseTrainer):
     def calculate_discriminator_loss(self, generator_outputs):
 
         length = generator_outputs["est_audio"].size(-1)
-        # pesq_score = generator_outputs['pesq_label'] / 4.5
         est_audio_list = list(generator_outputs["est_audio"].detach().cpu().numpy())
         clean_audio_list = list(generator_outputs["clean"].cpu().numpy()[:, :length])
         pesq_score = discriminator.batch_pesq(clean_audio_list, est_audio_list)
@@ -315,8 +314,6 @@ class KDTrainer(BaseTrainer):
         clean = batch[0].cuda()
         noisy = batch[1].cuda()
         one_labels = torch.ones(clean.size(0)).cuda()
-        teacher_pesq_label = batch[4].cuda()
-        teacher_pesq_label = teacher_pesq_label.type(torch.float32)
 
         teacher_enhance = batch[2].cuda()
         # Normalization
@@ -330,12 +327,6 @@ class KDTrainer(BaseTrainer):
             noise, clean = sources
             noisy = noise + clean
         
-        if self.forward_teacher:
-            teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
-        else:
-            teacher_enhance = torch.transpose(teacher_enhance, 0, 1)
-            teacher_enhance = torch.transpose(teacher_enhance * c, 0, 1) 
-            teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
 
         if self.remix_snr and torch.rand(1)[0] > 0.5:
         # if self.remix_snr:
@@ -351,6 +342,13 @@ class KDTrainer(BaseTrainer):
         student_generator_outputs["one_labels"] = one_labels
         se_loss = self.calculate_se_loss(student_generator_outputs)
         if self.distiller is not None:
+            if self.forward_teacher:
+                teacher_generator_outputs = self.forward_step(self.teacher_model, clean, noisy, "teacher")
+            else:
+                teacher_enhance = torch.transpose(teacher_enhance, 0, 1)
+                teacher_enhance = torch.transpose(teacher_enhance * c, 0, 1) 
+                teacher_generator_outputs = self.forward_only_teacher_step(teacher_enhance)
+                
             kd_loss = self.distiller(student_generator_outputs, teacher_generator_outputs)
         else:
             kd_loss = torch.tensor([0.0]).cuda()
@@ -369,8 +367,6 @@ class KDTrainer(BaseTrainer):
             self.distiller_optimizer.step()
             self.distiller_optimizer.zero_grad()
 
-        # Train Discriminator
-        student_generator_outputs['pesq_label'] = teacher_pesq_label
         discriminator_loss = self.calculate_discriminator_loss(student_generator_outputs)
         
         if discriminator_loss is not None:
@@ -414,10 +410,10 @@ class KDTrainer(BaseTrainer):
             kd_loss_train.append(kd_loss)
             se_loss_train.append(se_loss)
             discriminator_loss_train.append(discriminator_loss)
-        
+            # print("---total loss: ", total_loss, kd_loss, se_loss)
+            # print("---mean loss: ", np.mean(loss_train), np.mean(kd_loss_train))
             if self.rank  == 0:
                 logprog.update(gen_loss=format(total_loss, ".5f"))
-
 
         loss_train = np.mean(loss_train)
         kd_loss_train = np.mean(kd_loss_train)

@@ -9,7 +9,7 @@ from utils import *
 from models.unet import UNet16, UNet32, UNet64
 from models.generator import TSCNet
 from models import discriminator
-from models.distiller import Distiller
+from models.distiller import Distiller, DistillerStagev3
 from time import gmtime, strftime
 from data import dataloader2
 import torch.distributed as dist
@@ -32,12 +32,14 @@ def cleanup():
 def setup(rank, world_size):
     torch.cuda.set_device(rank)
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29501'
+    os.environ['MASTER_PORT'] = '29500'
     # os.environ['NCCL_BLOCKING_WAIT'] = '0'  # not to enforce timeout
-    torch.distributed.init_process_group(
-        backend="gloo",
-        world_size=world_size,
-        rank=rank)
+    # torch.distributed.init_process_group(
+    #     backend="gloo",
+    #     world_size=world_size,
+    #     rank=rank)
+    
+    torch.distributed.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 def load_state_dict_from_checkpoint(checkpoint_path):
     state_dict = torch.load(checkpoint_path)
@@ -115,30 +117,18 @@ def entry(rank, world_size, config):
 
     logger.info(f"Total iteration through trainset: {len(train_ds)}")
     logger.info(f"Total iteration through testset: {len(test_ds)}")
-    forward_teacher = config['main']['criterion']['AKD'] or config['main']['criterion']['AFDLoss'] or config['main']['criterion']['FAKD']
-    
-    model = load_student_model(model_type=config["main"]["student_model"], n_channels=num_channel)
-    model = DistributedDataParallel(model.to(rank), device_ids=[rank], find_unused_parameters=True)
 
-    teacher_model = load_teacher_model(checkpoint_path=config['main']['teacher_checkpoint'], n_fft=n_fft)
-    teacher_model = DistributedDataParallel(teacher_model.to(rank), device_ids=[rank], find_unused_parameters=True)
+    model = load_teacher_model(checkpoint_path=config['main']['teacher_checkpoint'], n_fft=n_fft)
+    model = DistributedDataParallel(model, device_ids=[rank], find_unused_parameters=True)
 
     discriminator_model = discriminator.Discriminator(ndf=16).cuda()
-    discriminator_model = DistributedDataParallel(discriminator_model.to(rank), device_ids=[rank], find_unused_parameters=True)
+    discriminator_model = DistributedDataParallel(discriminator_model, device_ids=[rank], find_unused_parameters=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=init_lr)
     optimizer_disc = torch.optim.AdamW(discriminator_model.parameters(), lr=2 * init_lr)
-    
-    if forward_teacher:
-        distiller = Distiller(config)
-        distiller = DistributedDataParallel(distiller.to(rank), device_ids=[rank], find_unused_parameters=True)
-        distiller_optimizer = torch.optim.AdamW(distiller.parameters(), lr=init_lr)
-    elif len(list(config['main']['criterion']['kd_weight'])) > 0:
-        distiller = Distiller(config)
-        distiller_optimizer = None
-    else:
-        distiller = None
-        distiller_optimizer = None
+
+    distiller = None
+    distiller_optimizer = None
 
 
     if rank == 0:
@@ -158,10 +148,7 @@ def entry(rank, world_size, config):
     # scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=decay_epoch, gamma=gamma)
     scheduler_D = torch.optim.lr_scheduler.StepLR(optimizer_disc, step_size=decay_epoch, gamma=gamma)
-    if forward_teacher:
-        scheduler_distiller = torch.optim.lr_scheduler.StepLR(distiller_optimizer, step_size=decay_epoch, gamma=gamma)
-    else:
-        scheduler_distiller = None
+    scheduler_distiller = None
         
     trainer = trainer_class(
         dist = dist,
@@ -171,7 +158,7 @@ def entry(rank, world_size, config):
         epochs = epochs,
         batch_size = batch_size,
         model = model,
-        teacher_model = teacher_model,
+        teacher_model = None,
         discriminator_model = discriminator_model,
         distiller = distiller,
         train_ds = train_ds,
@@ -198,7 +185,7 @@ def entry(rank, world_size, config):
         tsb_writer = writer,
         num_prints = num_prints,
         logger = logger,
-        forward_teacher = forward_teacher
+        forward_teacher = False
     )
 
     trainer.train()
@@ -221,14 +208,15 @@ if __name__ == '__main__':
 
     available_gpus = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
     print("GPU list:", available_gpus)
-    argument.n_gpus = len(available_gpus)
+    # argument.n_gpus = len(available_gpus)
+    argument.n_gpus = 1
     print("Number of gpu:", argument.n_gpus)
 
     try: 
         mp.spawn(entry,
                 args=(argument.n_gpus, config),
                 nprocs=argument.n_gpus,
-                join=True)
+                join=False)
     except KeyboardInterrupt:
         print('Interrupted')
         try: 

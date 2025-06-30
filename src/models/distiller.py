@@ -77,9 +77,9 @@ class DistillerStage2(nn.Module):
         
         if config['main']['criterion']['AFDLoss']:
             if student_model == 'Unet16':
-                s_shapes = [(batch_size, 16, 321, 210), (batch_size, 32, 160, 100), (batch_size, 64, 80, 50), (batch_size, 128, 40, 25), (batch_size, 128, 20, 12)]
+                s_shapes = [(batch_size, 16, 321, 201), (batch_size, 32, 160, 100), (batch_size, 64, 80, 50), (batch_size, 128, 40, 25), (batch_size, 128, 20, 12)]
             else:
-                s_shapes = [(batch_size, 32, 321, 210), (batch_size, 64, 160, 100), (batch_size, 128, 80, 50), (batch_size, 256, 40, 25), (batch_size, 256, 20, 12)]
+                s_shapes = [(batch_size, 32, 321, 201), (batch_size, 64, 160, 100), (batch_size, 128, 80, 50), (batch_size, 256, 40, 25), (batch_size, 256, 20, 12)]
             
             t_shapes = [(batch_size, 32, 321, 201), (batch_size, 64, 160, 100), (batch_size, 128, 80, 50), (batch_size, 256, 40, 25), (batch_size, 256, 20, 12)]
             # t_shapes = [(batch_size, 64, 321, 201), (batch_size, 128, 160, 100), (batch_size, 256, 80, 50), (batch_size, 512, 40, 25), (batch_size, 512, 20, 12)]
@@ -158,7 +158,7 @@ class DistillerStagev3(nn.Module):
             # t_shapes_dec = [(batch_size, 128, 40, 25), (batch_size, 64, 80, 50), (batch_size, 32, 160, 100), (batch_size, 32, 321, 201)]
 
         if config['main']['criterion']['AFDLoss']:
-            criterion_kd_list.append(AFDEncDec(t_shapes_enc, t_shapes_dec, s_shapes_enc, s_shapes_dec))
+            criterion_kd_list.append(AFDEncDec(t_shapes_enc, t_shapes_dec, s_shapes_enc, s_shapes_dec, qk_dim=512))
 
         if config['main']['criterion']['UCLFWPKD']:
             criterion_kd_list.append(UCLFWPKD(t_shapes_enc, s_shapes_enc, t_shapes_dec, s_shapes_dec))

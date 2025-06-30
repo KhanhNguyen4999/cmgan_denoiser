@@ -1,15 +1,15 @@
 [main]
-name = "CMGAN_unet_32_bilinear_discriminator_dilation_kd_logit_remix"
+name = "Unet_64_bilinear_discriminator_to_Unet32_kd_logit_remix"
 seed = 0
 epochs = 100
 cut_len = 32000
-save_model_dir = "/root/khanhnnm/se/checkpoint"
+save_model_dir = "/root/khanhnnm/se/checkpoint/librimix"
 use_amp = false
 use_ZeRo = false
-teacher_checkpoint = "/root/khanhnnm/se/cmgan_denoiser/src/best_ckpt/ckpt"
+teacher_checkpoint = "/root/khanhnnm/se/checkpoint/librimix/CMGAN_unet_64_bilinear_discriminator_kd_logit_remix/checkpoints/best.th"
 student_model = "Unet32"
 sr = 16000
-interval_eval = 5
+interval_eval = 10
 resume = true
 max_clip_grad_norm = 2.0
 gradient_accumulation_steps = 1
@@ -25,13 +25,13 @@ hop = 100
 ndf = 16
 
 [dataset_train]
-path = "/root/khanhnnm/se/VCTK/train"
+path = "/root/khanhnnm/se/LibriMix/Libri2Mix/wav16k/min/train-100"
 
 [dataset_valid]
-path = "/root/khanhnnm/se/VCTK/test"
+path = "/root/khanhnnm/se/LibriMix/Libri2Mix/wav16k/min/dev"
 
 [dataset_test]
-path = "/root/khanhnnm/se/VCTK/test"
+path = "/root/khanhnnm/se/LibriMix/Libri2Mix/wav16k/min/test"
 
 [optimizer]
 init_lr = 0.005

@@ -103,7 +103,7 @@ class DemandDataset(torch.utils.data.Dataset):
         self.cut_len = cut_len
         self.clean_dir = os.path.join(data_dir, 'clean')
         self.noisy_dir = os.path.join(data_dir, 'noisy')
-        self.teacher_enhance_dir = os.path.join(data_dir, 'auxiliary_enhance')
+        self.teacher_enhance_dir = os.path.join(data_dir, 'auxiliary_enhance_u64')
 
         self.clean_wav_name = os.listdir(self.clean_dir)
         self.clean_wav_name = natsorted(self.clean_wav_name)
@@ -166,17 +166,10 @@ class DemandDataset3(torch.utils.data.Dataset):
         self.cut_len = cut_len
         self.clean_dir = os.path.join(data_dir, 'clean')
         self.noisy_dir = os.path.join(data_dir, 'noisy')
-        self.teacher_enhance_dir = os.path.join(data_dir, 'enhance')
+        self.teacher_enhance_dir = os.path.join(data_dir, 'enhance_u64_remix')
 
         self.clean_wav_name = os.listdir(self.clean_dir)
         self.clean_wav_name = natsorted(self.clean_wav_name)
-
-        wav_2_pesq = {}
-        with open(f"{data_dir}/pesq_label.txt") as reader:
-            for line in reader.readlines():
-                audio_name, pesq = line.split(" ")
-                wav_2_pesq[audio_name] = float(pesq.strip()) 
-        self.wav_2_pesq = wav_2_pesq
 
     def __len__(self):
         return len(self.clean_wav_name)
@@ -186,7 +179,6 @@ class DemandDataset3(torch.utils.data.Dataset):
         noisy_file = os.path.join(self.noisy_dir, self.clean_wav_name[idx])
         enhance_file = os.path.join(self.teacher_enhance_dir, self.clean_wav_name[idx])
 
-        pesq = self.wav_2_pesq[self.clean_wav_name[idx]]
         clean_ds, _ = torchaudio.load(clean_file)
         noisy_ds, _ = torchaudio.load(noisy_file)
         enhance_ds, _ = torchaudio.load(enhance_file)
@@ -195,8 +187,11 @@ class DemandDataset3(torch.utils.data.Dataset):
         noisy_ds = noisy_ds.squeeze()
         enhance_ds = enhance_ds.squeeze()
 
-        length = len(clean_ds)
-        assert length == len(noisy_ds)
+        # Uncomment this line to reproduce in VCTK dataset
+        # length = len(clean_ds)
+        length = len(enhance_ds)
+
+        # assert length == len(noisy_ds)
         if length < self.cut_len:
             units = self.cut_len // length
             clean_ds_final = []
@@ -221,8 +216,10 @@ class DemandDataset3(torch.utils.data.Dataset):
             clean_ds = clean_ds[wav_start:wav_start + self.cut_len]
             enhance_ds = enhance_ds[wav_start:wav_start + self.cut_len]
 
-        return clean_ds, noisy_ds, enhance_ds, length, pesq
+        return clean_ds, noisy_ds, enhance_ds, length
     
+
+
 class Audioset:
     def __init__(self, data_dir, cut_len=16000*2):
         """
@@ -290,11 +287,11 @@ def load_data(ds_dir, batch_size, n_cpu, rank, cut_len, world_size, shuffle):
     torchaudio.set_audio_backend("sox_io")         # in linux
 
     ds_dir = "/".join(ds_dir.split("/")[:-1])
-    train_dir = os.path.join(ds_dir, 'train')
-    test_dir = os.path.join(ds_dir, 'test')
+    train_dir = os.path.join(ds_dir, 'train-100')
+    test_dir = os.path.join(ds_dir, 'dev')
 
-    train_ds = DemandDataset(train_dir, cut_len)
-    test_ds = DemandDataset(test_dir, cut_len)
+    train_ds = DemandDataset3(train_dir, cut_len)
+    test_ds = DemandDataset3(test_dir, cut_len)
 
     train_sampler = DistributedSampler(dataset=train_ds, num_replicas=world_size, rank=rank, shuffle=shuffle)
     train_dataset = torch.utils.data.DataLoader(dataset=train_ds, 

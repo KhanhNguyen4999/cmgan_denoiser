@@ -12,11 +12,11 @@ class DilatedDenseNet(nn.Module):
         self.twidth = 2
         self.kernel_size = (self.twidth, 3)
         for i in range(self.depth):
-            # dil = 1
-            if in_channels == 64 or in_channels == 32:
-                dil = 2 ** i
-            else:
-                dil = 1
+            dil = 2 ** i
+            # if in_channels == 64 or in_channels == 32:
+            #     dil = 2 ** i
+            # else:
+            #     dil = 1
                 
             pad_length = self.twidth + (dil - 1) * (self.twidth - 1) - 1
             setattr(self, 'pad{}'.format(i + 1), nn.ConstantPad2d((1, 1, pad_length, 0), value=0.))

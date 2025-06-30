@@ -9,7 +9,7 @@ from utils import *
 from models.unet import UNet16, UNet32, UNet64
 from models.generator import TSCNet
 from models import discriminator
-from models.distiller import Distiller
+from models.distiller import Distiller, DistillerStagev3
 from time import gmtime, strftime
 from data import dataloader2
 import torch.distributed as dist
@@ -32,7 +32,7 @@ def cleanup():
 def setup(rank, world_size):
     torch.cuda.set_device(rank)
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29501'
+    os.environ['MASTER_PORT'] = '29500'
     # os.environ['NCCL_BLOCKING_WAIT'] = '0'  # not to enforce timeout
     torch.distributed.init_process_group(
         backend="gloo",
@@ -44,7 +44,8 @@ def load_state_dict_from_checkpoint(checkpoint_path):
     from collections import OrderedDict
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
-        name = k
+        # name = k
+        name = k[7:]
         new_state_dict[name] = v
     return new_state_dict
 
@@ -62,6 +63,9 @@ def load_teacher_model(checkpoint_path, n_fft):
     teacher_model = TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
     teacher_model.load_state_dict(state_dict)
     return teacher_model
+
+
+
 
 def entry(rank, world_size, config):
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
@@ -132,11 +136,11 @@ def entry(rank, world_size, config):
 
     print("---------- forward teacher: ", forward_teacher)
     if forward_teacher:
-        distiller = Distiller(config)
+        distiller = DistillerStagev3(config)
         distiller = DistributedDataParallel(distiller.to(rank), device_ids=[rank], find_unused_parameters=True)
         distiller_optimizer = torch.optim.AdamW(distiller.parameters(), lr=init_lr)
     elif len(list(config['main']['criterion']['kd_weight'])) > 0:
-        distiller = Distiller(config)
+        distiller = DistillerStagev3(config)
         distiller_optimizer = None
     else:
         distiller = None
@@ -227,10 +231,13 @@ if __name__ == '__main__':
     print("Number of gpu:", argument.n_gpus)
 
     try: 
-        mp.spawn(entry,
-                args=(argument.n_gpus, config),
-                nprocs=argument.n_gpus,
-                join=True)
+        # mp.spawn(entry,
+        #         args=(argument.n_gpus, config),
+        #         nprocs=argument.n_gpus,
+        #         join=True)
+
+        # mp.set_start_method('spawn', force=True)
+        entry(rank=0, world_size=1, config=config)
     except KeyboardInterrupt:
         print('Interrupted')
         try: 

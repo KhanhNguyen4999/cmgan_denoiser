@@ -11,6 +11,8 @@ import soundfile as sf
 import argparse
 import time
 import logging 
+import torch
+from tqdm import tqdm
 
 logging.basicConfig(filename="train.log",
                     filemode='a',
@@ -21,164 +23,113 @@ logging.basicConfig(filename="train.log",
 
 logger = logging.getLogger(__name__)
 
+
+
 @torch.no_grad()
-def enhance_one_track(model, audio_path, saved_dir, cut_len, n_fft=400, hop=100, save_tracks=False):
-    try:  
-        name = os.path.split(audio_path)[-1]
-        noisy, sr = torchaudio.load(audio_path)
-        assert sr == 16000
-        noisy = noisy.cuda()
+def enhance_one_track(
+    model, audio_path, saved_dir, cut_len, n_fft=400, hop=100, save_tracks=False
+):
+    torch.cuda.empty_cache()
+    name = os.path.split(audio_path)[-1]
+    noisy, sr = torchaudio.load(audio_path)
+    assert sr == 16000
+    noisy = noisy.cuda()
 
-        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy ** 2.0), dim=-1))
-        noisy = torch.transpose(noisy, 0, 1)
-        noisy = torch.transpose(noisy * c, 0, 1)
+    # c = torch.sqrt(noisy.size(-1) / torch.sum((noisy**2.0), dim=-1))
+    c = torch.sqrt(noisy.size(-1) / (torch.sum((noisy**2.0), dim=-1) + 1e-8))
+    noisy = torch.transpose(noisy, 0, 1)
+    noisy = torch.transpose(noisy * c, 0, 1)
 
-        length = noisy.size(-1)
-        frame_num = int(np.ceil(length / 100))
-        padded_len = frame_num * 100
-        padding_len = padded_len - length
-        noisy = torch.cat([noisy, noisy[:, :padding_len]], dim=-1)
-        if padded_len > cut_len:
-            batch_size = int(np.ceil(padded_len/cut_len))
-            while 100 % batch_size != 0:
-                batch_size += 1
-            noisy = torch.reshape(noisy, (batch_size, -1))
+    length = noisy.size(-1)
+   
+    frame_num = int(np.ceil(length / 100))
+    padded_len = frame_num * 100
+    padding_len = padded_len - length
+    noisy = torch.cat([noisy, noisy[:, :padding_len]], dim=-1)
 
-        noisy_spec = torch.view_as_real(torch.stft(noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), 
-                                                   onesided=True, 
-                                                   return_complex=True))
-        
-        noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
-        time_start = time.time()
-        
-        if noisy_spec.shape[2] % 2 == 0:
-            import torch.nn.functional as F
-            noisy_spec = F.pad(noisy_spec, (0, 0, 0, 1))
+    if padded_len > cut_len:
+        batch_size = int(np.ceil(padded_len / cut_len))
+        while 100 % batch_size != 0:
+            batch_size += 1
+        noisy = torch.reshape(noisy, (batch_size, -1))
+    
+    noisy_spec = torch.view_as_real(torch.stft(noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), 
+                                                onesided=True, 
+                                                return_complex=True,
+                                                pad_mode="constant"))
+    noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
+    # Để reproduce được kết quả cũ trên VCTK thì uncomment dòng này
+    # if noisy_spec.shape[2] % 2 == 0:
+    #     import torch.nn.functional as F
+    #     noisy_spec = F.pad(noisy_spec, (0, 0, 0, 1))
 
-        est_real, est_imag, _, _ = model(noisy_spec)
-        time_end = time.time()
-        est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
+    est_real, est_imag, _, _ = model(noisy_spec)
+    est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
 
-        est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
-        est_audio = torch.istft(est_spec_uncompress, n_fft, hop, window=torch.hamming_window(n_fft).cuda(),
-                                onesided=True)
-        est_audio = est_audio / c
-        est_audio = torch.flatten(est_audio)[:length].cpu().numpy()
-        assert len(est_audio) == length
-        if save_tracks:
-            saved_path = os.path.join(saved_dir, name)
-            sf.write(saved_path, est_audio, sr)
+    est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
+    est_audio = torch.istft(
+        est_spec_uncompress,
+        n_fft,
+        hop,
+        window=torch.hamming_window(n_fft).cuda(),
+        onesided=True,
+    )
+    est_audio = est_audio / c
+    est_audio = torch.flatten(est_audio)[:length].cpu().numpy()
 
-        RTF = (time_end - time_start) / (length / sr)
-    except Exception as exp:
-        print("exp: ", exp)
-        est_audio = None
-        length = None
-        RTF = None
-    return est_audio, length, RTF
+    if len(est_audio) != length:
+        print(f"{len(est_audio)} verus {length}")
 
+    if save_tracks:
+        saved_path = os.path.join(saved_dir, name)
+        sf.write(saved_path, est_audio, sr)
 
-def evaluation32(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
+    return est_audio, length
+
+def evaluation_cmgan_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
     n_fft = 400
-  
-    state_dict = torch.load(model_path)
-    from collections import OrderedDict
-    new_state_dict = OrderedDict()
-    for k, v in state_dict.items():
-        name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
-        #name = k
-        new_state_dict[name] = v
-
-    #model = generator.TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
-    model = UNet32(n_channels=3, bilinear=True)
-    model.load_state_dict(new_state_dict)
     model.eval()
-    model = model.cuda()
 
     if not os.path.exists(saved_dir):
         os.mkdir(saved_dir)
 
     audio_list = os.listdir(noisy_dir)
     audio_list = natsorted(audio_list)
-    
-    ls_est_audio = Parallel(n_jobs=1, prefer="threads")(
-                delayed(enhance_one_track)(model, 
-                                            os.path.join(noisy_dir, audio),
-                                            saved_dir,
-                                            16000*10, 
-                                            n_fft, 
-                                            n_fft//4, 
-                                            save_tracks
-                                            ) for audio in audio_list)
-    
-    RTF = np.mean([e[2] for e in ls_est_audio])
-    
+
+    metrics_total = np.zeros(6)
+    ls_est_audio = []
+    num = 0
+    for audio in tqdm(audio_list):
+        torch.cuda.empty_cache()
+        noisy_path = os.path.join(noisy_dir, audio)
+        est_audio, length = enhance_one_track(
+            model, noisy_path, saved_dir, 16000 * 10, n_fft, n_fft // 4, save_tracks
+        )
+        print("Path: {} and length {}".format(noisy_path, length))
+        if est_audio is not None:
+            ls_est_audio.append(est_audio)
+            num += 1
+
     sr = 16000
     metrics = Parallel(n_jobs=10)(
         delayed(compute_metrics)(sf.read(os.path.join(clean_dir, audio_list[i]))[0],
-                                ls_est_audio[i][0],
+                                ls_est_audio[i],
                                 sr,
                                 0) for i in range(len(ls_est_audio))
     )
 
     metrics_avg = np.mean(metrics, 0)
 
-    print('pesq: ', metrics_avg[0], 
-          'csig: ', metrics_avg[1], 
-          'cbak: ', metrics_avg[2], 
-          'covl: ', metrics_avg[3], 
-          'ssnr: ', metrics_avg[4], 
-          'stoi: ', metrics_avg[5],
-          'RTF: ', RTF )
+    metrics_avg_dict = {"pesq": metrics_avg[0], 
+                        "csig": metrics_avg[1], 
+                        "cbak": metrics_avg[2], 
+                        "covl": metrics_avg[3], 
+                        "ssnr": metrics_avg[4],
+                        "stoi": metrics_avg[5]}
+    
+    return metrics_avg_dict
 
-# def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
-#     # pesq_label_writer = open("/root/khanhnnm/se/VCTK/test/pesq_label.txt", "w")
-#     n_fft = 400
-#     model = generator.TSCNet(num_channel=64, num_features=n_fft // 2 + 1).cuda()
-#     model.load_state_dict((torch.load(model_path)))
-#     model.eval()
 
-#     if not os.path.exists(saved_dir):
-#         os.mkdir(saved_dir)
-
-#     audio_list = os.listdir(noisy_dir)
-#     audio_list = natsorted(audio_list)
-#     num = len(audio_list)
-#     metrics_total = np.zeros(6)
-#     for audio in audio_list:
-#         noisy_path = os.path.join(noisy_dir, audio)
-#         clean_path = os.path.join(clean_dir, audio)
-#         print("clean path: ", clean_path)
-#         est_audio, length, _ = enhance_one_track(
-#             model, noisy_path, saved_dir, 16000 * 10, n_fft, n_fft // 4, save_tracks
-#         )
-#         clean_audio, sr = sf.read(clean_path)
-#         assert sr == 16000
-#         if est_audio is None:
-#             # pesq_label_writer.write("{} {}\n".format(audio, 0.0))
-#             None
-#         else: 
-#             metrics = compute_metrics(clean_audio, est_audio, sr, 3.5)
-#             metrics = np.array(metrics)
-#             metrics_total += metrics
-#             # pesq_label_writer.write("{} {}\n".format(audio, metrics[0]))
-
-#     metrics_avg = metrics_total / num
-#     print(
-#         "pesq: ",
-#         metrics_avg[0],
-#         "csig: ",
-#         metrics_avg[1],
-#         "cbak: ",
-#         metrics_avg[2],
-#         "covl: ",
-#         metrics_avg[3],
-#         "ssnr: ",
-#         metrics_avg[4],
-#         "stoi: ",
-#         metrics_avg[5],
-#     )
-#     # pesq_label_writer.close()
 
 def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
     n_fft = 400
@@ -190,7 +141,7 @@ def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
     audio_list = os.listdir(noisy_dir)
     audio_list = natsorted(audio_list)
     
-    ls_est_audio = Parallel(n_jobs=2, prefer="threads")(
+    ls_est_audio = Parallel(n_jobs=1, prefer="processes")(
                 delayed(enhance_one_track)(model, 
                                             os.path.join(noisy_dir, audio),
                                             saved_dir,
@@ -201,7 +152,7 @@ def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
                                             ) for audio in audio_list)
     
     sr = 16000
-    metrics = Parallel(n_jobs=10)(
+    metrics = Parallel(n_jobs=10, prefer="processes")(
         delayed(compute_metrics)(sf.read(os.path.join(clean_dir, audio_list[i]))[0],
                                 ls_est_audio[i][0],
                                 sr,
@@ -209,18 +160,13 @@ def evaluation_model(model, noisy_dir, clean_dir, save_tracks, saved_dir):
     )
 
     metrics_avg = np.mean(metrics, 0)
-    RTF = np.mean([e[2] for e in ls_est_audio])
-    
-    # print('pesq: ', metrics_avg[0], 'csig: ', metrics_avg[1], 'cbak: ', metrics_avg[2], 'covl: ',
-    #       metrics_avg[3], 'ssnr: ', metrics_avg[4], 'stoi: ', metrics_avg[5])
 
     metrics_avg_dict = {"pesq": metrics_avg[0], 
                         "csig": metrics_avg[1], 
                         "cbak": metrics_avg[2], 
                         "covl": metrics_avg[3], 
                         "ssnr": metrics_avg[4],
-                        "stoi": metrics_avg[5],
-                        "RTF": RTF}
+                        "stoi": metrics_avg[5]}
     
     return metrics_avg_dict
 
@@ -232,20 +178,13 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
         name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
-        #name = k
+        # name = k
         new_state_dict[name] = v
 
-    #model = generator.TSCNet(num_channel=64, num_features=n_fft//2+1).cuda()
     model = UNet32(n_channels=3, bilinear=True)
     model.load_state_dict(new_state_dict)
     model.eval()
     model = model.cuda()
-
-    #----
-    # n_fft = 400
-    # model = generator.TSCNet(num_channel=64, num_features=n_fft // 2 + 1).cuda()
-    # model.load_state_dict((torch.load(model_path)))
-    # model.eval()
 
     if not os.path.exists(saved_dir):
         os.mkdir(saved_dir)
@@ -253,18 +192,16 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
     audio_list = os.listdir(noisy_dir)
     audio_list = natsorted(audio_list)
 
-    ls_est_audio = Parallel(n_jobs=1, prefer="threads")(
+    ls_est_audio = Parallel(n_jobs=1, prefer="processes")(
                 delayed(enhance_one_track)(model,
                                             os.path.join(noisy_dir, audio),
                                             saved_dir,
-                                            16000*15,
+                                            16000*10,
                                             n_fft,
                                             n_fft//4,
                                             save_tracks
                                             ) for audio in audio_list)
-
-    RTF = np.mean([e[2] for e in ls_est_audio])
-
+    
     sr = 16000
     metrics = Parallel(n_jobs=10)(
         delayed(compute_metrics)(sf.read(os.path.join(clean_dir, audio_list[i]))[0],
@@ -274,14 +211,107 @@ def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
     )
 
     metrics_avg = np.mean(metrics, 0)
-
     print('pesq: ', metrics_avg[0],
           'csig: ', metrics_avg[1],
           'cbak: ', metrics_avg[2],
           'covl: ', metrics_avg[3],
           'ssnr: ', metrics_avg[4],
           'stoi: ', metrics_avg[5],
-          'RTF: ', RTF )
+        )
+
+
+def evaluation_cmgan(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
+
+    state_dict = torch.load(model_path)
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
+        new_state_dict[name] = v
+
+    n_fft = 400
+    model = generator.TSCNet(num_channel=64, num_features=n_fft // 2 + 1).cuda()
+    model.load_state_dict(new_state_dict)
+    model.eval()
+
+    if not os.path.exists(saved_dir):
+        os.mkdir(saved_dir)
+
+    audio_list = os.listdir(noisy_dir)
+    audio_list = natsorted(audio_list)
+    num = len(audio_list)
+    num = 0
+    metrics_total = np.zeros(6)
+    ls_est_audio = []
+    for audio in tqdm(audio_list):
+        torch.cuda.empty_cache()
+        noisy_path = os.path.join(noisy_dir, audio)
+        est_audio, length = enhance_one_track(
+            model, noisy_path, saved_dir, 16000 * 10, n_fft, n_fft // 4, save_tracks
+        )
+        print("Path: {} and length {}".format(noisy_path, length))
+        if est_audio is not None:
+            ls_est_audio.append(est_audio)
+
+
+    sr = 16000
+    metrics = Parallel(n_jobs=10)(
+        delayed(compute_metrics)(sf.read(os.path.join(clean_dir, audio_list[i]))[0],
+                                ls_est_audio[i],
+                                sr,
+                                0) for i in range(len(ls_est_audio))
+    )
+
+    metrics_avg = np.mean(metrics, 0)
+
+    metrics_avg_dict = {"pesq": metrics_avg[0], 
+                        "csig": metrics_avg[1], 
+                        "cbak": metrics_avg[2], 
+                        "covl": metrics_avg[3], 
+                        "ssnr": metrics_avg[4],
+                        "stoi": metrics_avg[5]}
+    
+    print(metrics_avg_dict)
+
+
+def evaluation_dataset(noisy_dir, clean_dir):
+    audio_list = os.listdir(noisy_dir)
+    audio_list = natsorted(audio_list)
+    num = len(audio_list)
+    num = 0
+    metrics_total = np.zeros(6)
+    for audio in audio_list:
+        torch.cuda.empty_cache()
+        noisy_path = os.path.join(noisy_dir, audio)
+        print("Path: ", noisy_path)
+        clean_path = os.path.join(clean_dir, audio)
+        
+        clean_audio, sr = sf.read(clean_path)
+        noisy_audio, sr = sf.read(noisy_path)
+
+        assert sr == 16000
+        metrics = compute_metrics(clean_audio, noisy_audio, sr, 0)
+        print(metrics)
+        metrics = np.array(metrics)
+        metrics_total += metrics
+
+        num+=1
+
+    metrics_avg = metrics_total / num
+    print(
+        "pesq: ",
+        metrics_avg[0],
+        "csig: ",
+        metrics_avg[1],
+        "cbak: ",
+        metrics_avg[2],
+        "covl: ",
+        metrics_avg[3],
+        "ssnr: ",
+        metrics_avg[4],
+        "stoi: ",
+        metrics_avg[5],
+    )
 
 def evaluation_last(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
     n_fft = 400
@@ -315,8 +345,6 @@ def evaluation_last(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
                                             save_tracks
                                             ) for audio in audio_list)
 
-    RTF = np.mean([e[2] for e in ls_est_audio])
-
     sr = 16000
     metrics = Parallel(n_jobs=10)(
         delayed(compute_metrics)(sf.read(os.path.join(clean_dir, audio_list[i]))[0],
@@ -332,8 +360,7 @@ def evaluation_last(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
           'cbak: ', metrics_avg[2],
           'covl: ', metrics_avg[3],
           'ssnr: ', metrics_avg[4],
-          'stoi: ', metrics_avg[5],
-          'RTF: ', RTF )
+          'stoi: ', metrics_avg[5])
 
 def eval_best_loss(checkpoint_path):
     package = torch.load(checkpoint_path, map_location = "cpu")
@@ -368,3 +395,70 @@ if __name__ == '__main__':
         load_from_checkpoint = True
         args.save_tracks = True
         evaluation_last(args.model_path, noisy_dir, clean_dir, args.save_tracks, args.save_dir)
+        # evaluation_dataset(noisy_dir, clean_dir)
+
+
+
+
+
+
+
+
+
+# def evaluation(model_path, noisy_dir, clean_dir, save_tracks, saved_dir):
+#     pesq_label_writer = open("/root/khanhnnm/se/checkpoint/CMGAN_unet_32_bilinear_discriminator_dilation_kd_logit_2/checkpoints/pesq_label.txt", "w")
+#     n_fft = 400
+#     state_dict = torch.load(model_path)
+#     from collections import OrderedDict
+#     new_state_dict = OrderedDict()
+#     for k, v in state_dict.items():
+#         name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
+#         #name = k
+#         new_state_dict[name] = v
+
+#     model = UNet32(n_channels=3, bilinear=True)
+#     model.load_state_dict(new_state_dict)
+#     model.eval()
+#     model = model.cuda()
+
+#     if not os.path.exists(saved_dir):
+#         os.mkdir(saved_dir)
+
+#     audio_list = os.listdir(noisy_dir)
+#     audio_list = natsorted(audio_list)
+#     num = len(audio_list)
+#     metrics_total = np.zeros(6)
+#     for audio in audio_list:
+#         noisy_path = os.path.join(noisy_dir, audio)
+#         clean_path = os.path.join(clean_dir, audio)
+#         print("clean path: ", clean_path)
+#         est_audio, length, _ = enhance_one_track(
+#             model, noisy_path, saved_dir, 16000 * 10, n_fft, n_fft // 4, save_tracks
+#         )
+#         clean_audio, sr = sf.read(clean_path)
+#         assert sr == 16000
+#         if est_audio is None:
+#             pesq_label_writer.write("{} {}\n".format(audio, 0.0))
+#             None
+#         else: 
+#             metrics = compute_metrics(clean_audio, est_audio, sr, 3.5)
+#             metrics = np.array(metrics)
+#             metrics_total += metrics
+#             pesq_label_writer.write("{} {}\n".format(audio, metrics[0]))
+
+#     metrics_avg = metrics_total / num
+#     print(
+#         "pesq: ",
+#         metrics_avg[0],
+#         "csig: ",
+#         metrics_avg[1],
+#         "cbak: ",
+#         metrics_avg[2],
+#         "covl: ",
+#         metrics_avg[3],
+#         "ssnr: ",
+#         metrics_avg[4],
+#         "stoi: ",
+#         metrics_avg[5],
+#     )
+#     pesq_label_writer.close()

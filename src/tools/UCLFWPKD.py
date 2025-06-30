@@ -217,7 +217,6 @@ class UCLFWPKD(nn.Module):
             
         # print("----Final dec: ", pred_res_dec_loss)
         KD_loss = pred_res_enc_loss + pred_res_dec_loss
-        print(KD_loss)
         return KD_loss
 
 
